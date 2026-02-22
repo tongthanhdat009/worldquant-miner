@@ -10,8 +10,11 @@ import logging
 print("[ollama_manager]   ✓ logging", flush=True)
 import time
 import threading
-print("[ollama_manager]   ✓ time, threading", flush=True)
-from typing import Optional, List, Dict, Callable
+import random
+import re
+import json
+print("[ollama_manager]   ✓ time, threading, random, re, json", flush=True)
+from typing import Optional, List, Dict, Callable, Any
 from datetime import datetime, timedelta
 print("[ollama_manager]   ✓ typing, datetime", flush=True)
 
@@ -64,7 +67,7 @@ class OllamaManager:
     def __init__(
         self, 
         base_url: str = "http://localhost:11434",
-        model: str = "qwen2.5-coder:1.5b",
+        model: str = "qwen2.5-coder:32b",
         timeout: int = 120,
         max_retries: int = 3,
         rate_limit: float = 2.0  # seconds between requests
@@ -628,6 +631,320 @@ class OllamaManager:
             logger.warning("Ollama generation failed after all retries")
             return None
     
+    def select_operators_and_fields_by_index(
+        self,
+        placeholder_expression: str,
+        available_operators: List[Dict],
+        available_fields: List[Dict],
+        progress_callback: Optional[Callable[[str], None]] = None,
+        generator: Optional[Any] = None,
+        region: str = None,  # New: for querying recently used fields
+        backtest_storage: Optional[Any] = None  # New: for querying database
+    ) -> Optional[Dict]:
+        """
+        Ask Ollama to select operators and fields by index to replace placeholders
+        
+        Args:
+            placeholder_expression: Expression with placeholders like "OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
+            available_operators: List of available operators
+            available_fields: List of available data fields
+            progress_callback: Optional progress callback
+            generator: Optional generator instance (to reuse mappings)
+        
+        Returns:
+            Dict with "operators" and "fields" mappings, or None if failed
+        """
+        from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+        
+        if generator is None:
+            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+
+        # Get recently used fields to avoid repetition
+        recently_used_fields = []
+        if region and backtest_storage and hasattr(backtest_storage, 'get_recently_used_fields'):
+            try:
+                recently_used_fields = backtest_storage.get_recently_used_fields(region, limit=50, lookback_hours=24)
+                if recently_used_fields:
+                    logger.debug(f"Excluding {len(recently_used_fields)} recently used fields for {region}")
+            except Exception as e:
+                logger.debug(f"Could not get recently used fields: {e}")
+
+        prompt = generator.get_operator_selection_prompt(
+            placeholder_expression,
+            available_operators,
+            available_fields,
+            recently_used_fields=recently_used_fields
+        )
+        
+        # Store generator for later use in replacement
+        self._last_generator = generator
+        
+        system_prompt = """You are a selection assistant. Your ONLY task is to select INDEX NUMBERS from provided lists.
+
+CRITICAL RULES:
+1. DO NOT generate or write any operator names or field names. ONLY return index numbers in JSON format.
+2. You MUST select indices for EVERY placeholder mentioned in the prompt - missing any placeholder is an error.
+3. Count the placeholders in the expression carefully - if you see OPERATOR1, OPERATOR2, OPERATOR3, OPERATOR4, you must select indices for ALL FOUR.
+4. Return ONLY a valid JSON object with index numbers. No explanations, no markdown, no operator names, no field names - just JSON with numbers.
+
+Example: If you see operator at [5], return 5 (not the operator name).
+Example: If you see field at [12], return 12 (not the field name).
+Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must include all three: {"operators": {"OPERATOR1": 5, "OPERATOR2": 12, "OPERATOR3": 23}}"""
+        
+        if progress_callback:
+            progress_callback("Asking Ollama to select operators and fields...")
+        
+        result = self.generate(prompt, system_prompt, temperature=0.3, max_tokens=500, progress_callback=progress_callback)
+        
+        if not result:
+            return None
+        
+        # Parse JSON response
+        try:
+            # Clean up result (remove markdown code blocks if present)
+            result = result.strip()
+            if '```' in result:
+                # Extract JSON from code block
+                lines = result.split('\n')
+                json_lines = []
+                in_json = False
+                for line in lines:
+                    if '```json' in line.lower() or '```' in line:
+                        in_json = not in_json
+                        continue
+                    if in_json or (line.strip().startswith('{') and line.strip().endswith('}')):
+                        json_lines.append(line)
+                if json_lines:
+                    result = '\n'.join(json_lines)
+            
+            # Try to find JSON object
+            json_match = re.search(r'\{[^{}]*"operators"[^{}]*\{[^{}]*\}[^{}]*"fields"[^{}]*\{[^{}]*\}[^{}]*\}', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(0)
+            
+            selection = json.loads(result)
+            
+            # Normalize placeholder keys to uppercase (handle both OPERATOR1 and operator1)
+            if 'operators' in selection:
+                normalized_operators = {}
+                for key, value in selection['operators'].items():
+                    # Convert to uppercase
+                    normalized_key = key.upper()
+                    normalized_operators[normalized_key] = value
+                selection['operators'] = normalized_operators
+            
+            if 'fields' in selection:
+                normalized_fields = {}
+                for key, value in selection['fields'].items():
+                    # Convert to uppercase
+                    normalized_key = key.upper()
+                    normalized_fields[normalized_key] = value
+                selection['fields'] = normalized_fields
+            
+            # Validate that ALL required placeholders are present
+            required_ops = getattr(generator, '_required_operator_placeholders', [])
+            required_fields = getattr(generator, '_required_field_placeholders', [])
+            
+            # Filter out any selections for placeholders that don't exist in the template
+            if 'operators' in selection:
+                valid_operators = {}
+                for key, value in selection['operators'].items():
+                    if key.upper() in required_ops:
+                        valid_operators[key.upper()] = value
+                    else:
+                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
+                selection['operators'] = valid_operators
+            
+            if 'fields' in selection:
+                valid_fields = {}
+                for key, value in selection['fields'].items():
+                    if key.upper() in required_fields:
+                        valid_fields[key.upper()] = value
+                    else:
+                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
+                selection['fields'] = valid_fields
+            
+            missing_operators = [op for op in required_ops if op not in selection.get('operators', {})]
+            missing_fields = [field for field in required_fields if field not in selection.get('fields', {})]
+            
+            if missing_operators or missing_fields:
+                logger.warning(f"⚠️ Ollama did not select all required placeholders!")
+                if missing_operators:
+                    logger.warning(f"   Missing operators: {missing_operators}")
+                if missing_fields:
+                    logger.warning(f"   Missing fields: {missing_fields}")
+                logger.warning(f"   Required operators: {required_ops}")
+                logger.warning(f"   Required fields: {required_fields}")
+                logger.warning(f"   Received (after filtering): {selection}")
+                # Don't return None - we'll try to work with what we have, but log the issue
+            
+            # Validate structure
+            if 'operators' in selection and 'fields' in selection:
+                return selection
+            else:
+                logger.warning(f"Invalid selection structure: {selection}")
+                return None
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON selection: {e}, response: {result[:200]}")
+            return None
+    
+    def replace_placeholders_with_selection(
+        self,
+        placeholder_expression: str,
+        available_operators: List[Dict],
+        available_fields: List[Dict],
+        progress_callback: Optional[Callable[[str], None]] = None,
+        region: str = None,  # New: for querying recently used fields
+        backtest_storage: Optional[Any] = None  # New: for querying database
+    ) -> Optional[str]:
+        """
+        Replace placeholders in expression by asking Ollama to select indices
+        
+        Args:
+            placeholder_expression: Expression with placeholders
+            available_operators: List of available operators
+            available_fields: List of available data fields
+            progress_callback: Optional progress callback
+        
+        Returns:
+            Expression with placeholders replaced, or None if failed
+        """
+        from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+        
+        # Create generator to get prompt and mappings
+        generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+        
+        # Ask Ollama to select (this will set _last_operator_mapping and _last_field_mapping)
+        selection = self.select_operators_and_fields_by_index(
+            placeholder_expression,
+            available_operators,
+            available_fields,
+            progress_callback,
+            generator=generator,
+            region=region,
+            backtest_storage=backtest_storage
+        )
+        
+        if not selection:
+            return None
+        
+        # Get mappings from generator (set during prompt generation)
+        operator_mapping = getattr(generator, '_last_operator_mapping', {})
+        field_mapping = getattr(generator, '_last_field_mapping', {})
+        
+        # Replace placeholders
+        result = placeholder_expression
+        
+        # First, find all placeholders in the template (regardless of case) and map them to normalized uppercase
+        # This handles cases where template has "operator1" but selection has "OPERATOR1"
+        operator_placeholder_map = {}  # Maps normalized (uppercase) placeholder -> actual placeholder in template
+        field_placeholder_map = {}  # Maps normalized (uppercase) placeholder -> actual placeholder in template
+        
+        # Find all operator placeholders in template (case-insensitive)
+        operator_pattern = r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b'
+        for match in re.finditer(operator_pattern, result, re.IGNORECASE):
+            found_placeholder = match.group(0)
+            normalized_placeholder = found_placeholder.upper()
+            if normalized_placeholder not in operator_placeholder_map:
+                operator_placeholder_map[normalized_placeholder] = found_placeholder
+        
+        # Find all field placeholders in template (case-insensitive)
+        field_pattern = r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b'
+        for match in re.finditer(field_pattern, result, re.IGNORECASE):
+            found_placeholder = match.group(0)
+            normalized_placeholder = found_placeholder.upper()
+            if normalized_placeholder not in field_placeholder_map:
+                field_placeholder_map[normalized_placeholder] = found_placeholder
+        
+        # Replace operators (use display index -> actual index mapping)
+        # Handle both uppercase OPERATOR1 and lowercase operator1
+        if 'operators' in selection:
+            for placeholder_key, display_index in selection['operators'].items():
+                # Normalize the key from selection to uppercase
+                normalized_key = placeholder_key.upper()
+                
+                # Find the actual placeholder in the template (might be lowercase)
+                actual_placeholder_in_template = operator_placeholder_map.get(normalized_key, normalized_key)
+                
+                # Convert display index to actual index
+                actual_index = operator_mapping.get(display_index, display_index)
+                if 0 <= actual_index < len(available_operators):
+                    operator_name = available_operators[actual_index].get('name', '')
+                    if operator_name:
+                        # Check if operator has minimum input requirements
+                        metadata = generator.operator_metadata.get(operator_name)
+                        if metadata and metadata.min_inputs > 1:
+                            # Count how many inputs this operator will get in the expression
+                            # Find the placeholder in the expression and count its arguments
+                            placeholder_pattern = r'\b' + re.escape(actual_placeholder_in_template) + r'\s*\('
+                            match = re.search(placeholder_pattern, result, re.IGNORECASE)
+                            if match:
+                                # Count arguments in the parentheses
+                                start_pos = match.end()
+                                depth = 1
+                                arg_count = 1  # At least 1 argument
+                                i = start_pos
+                                while i < len(result) and depth > 0:
+                                    if result[i] == '(':
+                                        depth += 1
+                                    elif result[i] == ')':
+                                        depth -= 1
+                                    elif result[i] == ',' and depth == 1:
+                                        arg_count += 1
+                                    i += 1
+                                
+                                # If operator needs at least N inputs but only has fewer, log warning
+                                if arg_count < metadata.min_inputs:
+                                    logger.warning(f"Operator {operator_name} needs at least {metadata.min_inputs} inputs but template provides {arg_count}")
+                        
+                        # Replace the actual placeholder found in template (case-insensitive)
+                        result = re.sub(
+                            r'\b' + re.escape(actual_placeholder_in_template) + r'\b',
+                            operator_name,
+                            result,
+                            flags=re.IGNORECASE
+                        )
+                        logger.debug(f"Replaced {actual_placeholder_in_template} (normalized: {normalized_key}) -> {operator_name} (display_idx={display_index}, actual_idx={actual_index})")
+        
+        # Replace fields (use display index -> actual index mapping)
+        # Handle both uppercase DATA_FIELD1 and lowercase data_field1
+        if 'fields' in selection:
+            for placeholder_key, display_index in selection['fields'].items():
+                # Normalize the key from selection to uppercase
+                normalized_key = placeholder_key.upper()
+                
+                # Find the actual placeholder in the template (might be lowercase)
+                actual_placeholder_in_template = field_placeholder_map.get(normalized_key, normalized_key)
+                
+                # Convert display index to actual index
+                actual_index = field_mapping.get(display_index, display_index)
+                if 0 <= actual_index < len(available_fields):
+                    field_id = available_fields[actual_index].get('id', '')
+                    if field_id:
+                        # Replace the actual placeholder found in template (case-insensitive)
+                        result = re.sub(
+                            r'\b' + re.escape(actual_placeholder_in_template) + r'\b',
+                            field_id,
+                            result,
+                            flags=re.IGNORECASE
+                        )
+                        logger.debug(f"Replaced {actual_placeholder_in_template} (normalized: {normalized_key}) -> {field_id} (display_idx={display_index}, actual_idx={actual_index})")
+        
+        # Final check: if there are still any placeholders left, this is a failure
+        remaining_operators = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', result, re.IGNORECASE)
+        remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', result, re.IGNORECASE)
+        if remaining_operators or remaining_fields:
+            logger.error(f"❌ CRITICAL: Some placeholders were not replaced! Remaining operators: {remaining_operators}, Remaining fields: {remaining_fields}")
+            logger.error(f"   Original template: {placeholder_expression[:100]}")
+            logger.error(f"   Result after replacement: {result[:100]}")
+            logger.error(f"   Selection dict: {selection}")
+            logger.error(f"   This indicates Ollama did not return selections for all placeholders, or replacement failed")
+            # Return None to indicate failure - caller should retry or use fallback
+            return None
+        
+        return result
+    
     def generate_template(
         self, 
         hypothesis: str,
@@ -639,7 +956,8 @@ class OllamaManager:
         successful_patterns: List[str] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
         use_placeholder_fields: bool = True,  # V2 approach: use placeholders to avoid misspelling
-        forbidden_operators: List[str] = None  # Operators that are forbidden (already used in batch)
+        forbidden_operators: List[str] = None,  # Operators that are forbidden (already used in batch)
+        use_algorithmic_generation: bool = True  # New: Use algorithmic generation + Ollama selection
     ) -> Optional[str]:
         """
         Generate alpha template from hypothesis with enhanced prompt engineering and AST guidance
@@ -652,10 +970,53 @@ class OllamaManager:
             available_operators: List of available operators from operatorRAW.json
             available_fields: List of available data fields for the region
             successful_patterns: List of successful template patterns to guide generation
+            use_algorithmic_generation: If True, use algorithmic generation + Ollama selection
             
         Returns:
-            Alpha expression or None
+            Alpha expression with placeholders or None
         """
+        # NEW APPROACH: Algorithmic generation + Ollama selection
+        if use_algorithmic_generation and available_operators and available_fields:
+            try:
+                from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+                
+                if progress_callback:
+                    progress_callback("Generating placeholder expression algorithmically...")
+                
+                # Step 1: Generate placeholder expression algorithmically
+                generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+                
+                # Choose generation method randomly
+                methods = ["random_walk", "brownian", "tree", "linear"]
+                method = random.choice(methods)
+                
+                placeholder_expr = generator.generate_placeholder_expression(
+                    max_operators=5,
+                    method=method
+                )
+                
+                logger.debug(f"Generated placeholder expression: {placeholder_expr}")
+                
+                if progress_callback:
+                    progress_callback("Asking Ollama to select operators and fields...")
+                
+                # Step 2: Ask Ollama to select operators/fields by index
+                selection = self.select_operators_and_fields_by_index(
+                    placeholder_expr,
+                    available_operators,
+                    available_fields,
+                    progress_callback
+                )
+                
+                # Return placeholder expression (will be replaced later in Step 5 or retry)
+                logger.info(f"Algorithmic generation placeholder: {placeholder_expr}")
+                return placeholder_expr
+                    
+            except Exception as e:
+                logger.error(f"Algorithmic generation failed: {e}", exc_info=True)
+                # Fall through to old method
+        
+        # OLD APPROACH: Direct Ollama generation (fallback)
         system_prompt = """You are an expert in quantitative finance and WorldQuant Brain alpha generation.
 Generate alpha expressions in FASTEXPR format that are syntactically correct and follow WorldQuant Brain conventions.
 FASTEXPR combines OPERATORS (functions) and DATA FIELDS (variables) in specific patterns.
@@ -694,29 +1055,61 @@ CRITICAL FASTEXPR SYNTAX RULES:
 12. All parentheses must be balanced
 13. Field IDs are case-sensitive and must match EXACTLY from the available fields list"""
         
-        # V2 Approach: Use ONLY the provided selected operators (exclusive selection from caller)
+        # V3 Approach: Use operator placeholders (OPERATOR1, OPERATOR2, etc.) to avoid misspelling
+        # Show all operators with definitions and let Ollama choose using placeholders
         if available_operators:
             # Use the provided operators directly (they are pre-selected for diversity by caller)
             selected_operators = available_operators  # Already filtered by caller for exclusive selection
             
-            # Show operators with clear instructions to use ONLY these
+            # Show operators with clear instructions to use placeholders
             operator_list = []
             operator_names = []
             for i, op in enumerate(selected_operators):
                 name = op.get('name', '')
                 definition = op.get('definition', '')
                 category = op.get('category', '')
+                description = op.get('description', '')
                 if name:
                     operator_names.append(name)
+                    # Parse definition to count inputs
+                    input_count = 0
                     if definition:
-                        operator_list.append(f"[{i}] {name}: {definition} ({category})")
-                    else:
-                        operator_list.append(f"[{i}] {name} ({category})")
+                        # Count input parameters in definition (input1, input2, input3, etc.)
+                        import re
+                        input_matches = re.findall(r'\binput\d+\b', definition, re.IGNORECASE)
+                        if input_matches:
+                            # Extract numbers and find max
+                            input_nums = [int(re.search(r'\d+', inp).group()) for inp in input_matches if re.search(r'\d+', inp)]
+                            input_count = max(input_nums) if input_nums else len(input_matches)
+                        else:
+                            # Check for common patterns: operator(input), operator(input1, input2), etc.
+                            if 'input' in definition.lower():
+                                # Count commas + 1 (rough estimate)
+                                input_count = definition.count(',') + 1
+                            else:
+                                # No explicit inputs mentioned, might be 0 or 1
+                                input_count = 1 if '(' in definition else 0
+                    
+                    # Show full operator information with input count
+                    op_info = f"[{i}] {name}"
+                    if description:
+                        op_info += f": {description}"
+                    if definition:
+                        op_info += f" (Definition: {definition})"
+                    if input_count > 0:
+                        op_info += f" [Takes {input_count} input{'s' if input_count > 1 else ''}]"
+                    if category:
+                        op_info += f" (Category: {category})"
+                    operator_list.append(op_info)
             
             if operator_list:
-                user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE ONLY THESE OPERATORS:"
+                user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE OPERATOR PLACEHOLDERS (OPERATOR1, OPERATOR2, etc.):"
                 user_prompt += "\n" + "\n".join(operator_list)
-                user_prompt += f"\n\n🚨 EXCLUSIVE OPERATOR LIST: {', '.join(operator_names)}"
+                user_prompt += f"\n\n🚨 OPERATOR PLACEHOLDERS: Use OPERATOR1, OPERATOR2, OPERATOR3, etc. instead of actual operator names!"
+                user_prompt += "\n- OPERATOR1 maps to the first operator in the list above"
+                user_prompt += "\n- OPERATOR2 maps to the second operator in the list above"
+                user_prompt += "\n- OPERATOR3 maps to the third operator in the list above"
+                user_prompt += "\n- And so on..."
                 
                 # Add forbidden operators list if provided
                 if forbidden_operators:
@@ -724,35 +1117,47 @@ CRITICAL FASTEXPR SYNTAX RULES:
                     user_prompt += "\n⚠️ If you use any of these forbidden operators, your expression will be REJECTED!"
                     user_prompt += "\n⚠️ Use ONLY operators from the AVAILABLE OPERATORS list above, NOT from the FORBIDDEN list!"
                 
-                user_prompt += "\n\nCRITICAL RULES:"
-                user_prompt += "\n1. You MUST use ONLY operators from the AVAILABLE OPERATORS list above"
+                user_prompt += "\n\nCRITICAL RULES FOR OPERATOR PLACEHOLDERS:"
+                user_prompt += "\n1. Use OPERATOR1, OPERATOR2, OPERATOR3, etc. as placeholders - DO NOT use actual operator names!"
+                user_prompt += "\n2. Example: OPERATOR1(DATA_FIELD1, 5) NOT ts_rank(DATA_FIELD1, 5)"
+                user_prompt += "\n3. Example: OPERATOR1(OPERATOR2(DATA_FIELD1), 5) for nested operators"
+                user_prompt += "\n4. The placeholders will be automatically replaced with actual operator names from the list above"
+                user_prompt += "\n5. Choose operators from the AVAILABLE OPERATORS list by using their index as OPERATOR1, OPERATOR2, etc."
+                user_prompt += "\n6. IMPORTANT: Check the operator definition to see how many inputs it takes!"
+                user_prompt += "\n   - If operator takes 1 input: OPERATOR1(DATA_FIELD1) or OPERATOR1(DATA_FIELD1, parameter)"
+                user_prompt += "\n   - If operator takes 2 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2) or OPERATOR1(DATA_FIELD1, DATA_FIELD2, parameter)"
+                user_prompt += "\n   - If operator takes 3 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2, DATA_FIELD3)"
+                user_prompt += "\n   - Look at the [Takes X input(s)] note in the operator list above"
                 if forbidden_operators:
-                    user_prompt += "\n2. DO NOT use operators from the FORBIDDEN list (if shown above)"
-                    user_prompt += "\n3. DO NOT use operators that are NOT in the AVAILABLE list (e.g., if 'rank' is not listed, DO NOT use 'rank')"
-                else:
-                    user_prompt += "\n2. DO NOT use operators that are NOT in the list (e.g., if 'rank' is not listed, DO NOT use 'rank')"
-                user_prompt += "\n4. If you see 'rank' in the AVAILABLE list, you can use it. If NOT, use alternatives like 'ts_rank', 'winsorize', 'zscore', etc."
-                user_prompt += "\n5. Mix different operator types from the AVAILABLE OPERATORS list"
-                user_prompt += "\n6. Use actual operator names exactly as shown in the AVAILABLE OPERATORS list above"
+                    user_prompt += "\n7. DO NOT use operators from the FORBIDDEN list"
         
-        # V2 Approach: Use placeholders (DATA_FIELD1, DATA_FIELD2, etc.) to avoid misspelling
+        # V3 Approach: Use placeholders (DATA_FIELD1, DATA_FIELD2, etc.) to avoid misspelling
+        # Randomly pick a subset of fields to show Ollama
         if use_placeholder_fields and available_fields:
+            import random
+            # Randomly select a subset of fields (between 15-30 fields) to show Ollama
+            num_fields_to_show = min(random.randint(15, 30), len(available_fields))
+            selected_field_indices = random.sample(range(len(available_fields)), num_fields_to_show)
+            selected_fields_to_show = [available_fields[i] for i in sorted(selected_field_indices)]
+            
             # Show fields with indices for reference, but instruct to use placeholders
             field_list = []
-            for i, field in enumerate(available_fields[:30]):  # Show first 30 fields
+            for i, field in enumerate(selected_fields_to_show):
                 field_id = field.get('id', '')
                 if field_id:
-                    field_list.append(f"[{i}] {field_id}")
+                    # Use the original index in available_fields for mapping
+                    original_idx = selected_field_indices[i]
+                    field_list.append(f"[{original_idx}] {field_id}")
             
             if field_list:
                 user_prompt += "\n\nAVAILABLE DATA FIELDS (use placeholders DATA_FIELD1, DATA_FIELD2, etc. - do NOT use actual field names!):"
-                user_prompt += "\n" + "\n".join(field_list[:20])  # Show first 20
-                user_prompt += f"\n... and {len(available_fields) - 20} more fields available"
-                user_prompt += "\n\nCRITICAL: Use PLACEHOLDERS, not actual field names!"
-                user_prompt += "\n- Use DATA_FIELD1, DATA_FIELD2, DATA_FIELD3, DATA_FIELD4 instead of actual field IDs"
-                user_prompt += "\n- Example: ts_rank(DATA_FIELD1, 20) NOT ts_rank(anl14_actvalue_capex_fp0, 20)"
-                user_prompt += "\n- Example: winsorize(DATA_FIELD1 + DATA_FIELD2, 4) NOT winsorize(anl14_actvalue_capex_fp0 + anl14_actvalue_bvps_fp0, 4)"
+                user_prompt += "\n" + "\n".join(field_list)
+                user_prompt += f"\n\nCRITICAL: Use PLACEHOLDERS, not actual field names!"
+                user_prompt += "\n- Use DATA_FIELD1, DATA_FIELD2, DATA_FIELD3, DATA_FIELD4, etc. instead of actual field IDs"
+                user_prompt += "\n- Example: OPERATOR1(DATA_FIELD1, 5) NOT OPERATOR1(anl14_actvalue_capex_fp0, 5)"
+                user_prompt += "\n- Example: OPERATOR1(DATA_FIELD1 + DATA_FIELD2, 4) NOT OPERATOR1(anl14_actvalue_capex_fp0 + anl14_actvalue_bvps_fp0, 4)"
                 user_prompt += "\n- This prevents misspelling errors - placeholders will be replaced automatically"
+                user_prompt += "\n- DATA_FIELD1 maps to the first field in the list above, DATA_FIELD2 to the second, etc."
         elif available_fields:
             # Fallback: Show actual field IDs (old approach)
             field_examples = []
@@ -775,20 +1180,21 @@ CRITICAL FASTEXPR SYNTAX RULES:
             for pattern in successful_patterns[:3]:  # Show top 3 patterns
                 user_prompt += f"\n  - {pattern}"
         
-        # Add concrete syntax examples using placeholders (V2 approach) - WITH COMMAS for parameters
-        user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use placeholders DATA_FIELD1, DATA_FIELD2, etc. - COMMAS for parameters!):"
+        # Add concrete syntax examples using placeholders (V3 approach) - WITH COMMAS for parameters
+        user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use OPERATOR1, OPERATOR2, DATA_FIELD1, DATA_FIELD2 placeholders - COMMAS for parameters!):"
         if use_placeholder_fields:
-            # Use placeholders in examples - COMMAS for operator parameters
-            user_prompt += "\n  - winsorize(DATA_FIELD1, 4)  # Winsorize to 4 std - COMMA between field and parameter"
-            user_prompt += "\n  - zscore(DATA_FIELD1)  # Z-score normalization (no parameter, no comma needed)"
-            user_prompt += "\n  - rank(DATA_FIELD1)  # Cross-sectional rank (no parameter, no comma needed)"
-            user_prompt += "\n  - ts_rank(DATA_FIELD1, 20)  # Time series rank - COMMA between field and parameter"
+            # Use operator and field placeholders in examples - COMMAS for operator parameters
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 4)  # Operator with parameter - COMMA between field and parameter"
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1)  # Operator without parameter (no comma needed)"
+            user_prompt += "\n  - OPERATOR1(OPERATOR2(DATA_FIELD1), 5)  # Nested operators - COMMA between arguments"
             user_prompt += "\n  - DATA_FIELD1 + DATA_FIELD2  # Arithmetic addition - NO comma (just space around +)"
-            user_prompt += "\n  - power(DATA_FIELD1, 2)  # Power operator - COMMA between field and parameter"
-            user_prompt += "\n  - abs(DATA_FIELD1 - ts_mean(DATA_FIELD1, 20))  # Absolute deviation - COMMA in ts_mean"
-            user_prompt += "\n  - ts_rank(DATA_FIELD1 * DATA_FIELD2, 10)  # Rank of product - COMMA before parameter"
-            user_prompt += "\n  - winsorize(DATA_FIELD1 / DATA_FIELD2, 3)  # Winsorized ratio - COMMA before parameter"
-            user_prompt += "\n  - rank(normalize(log(DATA_FIELD1)), DATA_FIELD2)  # Complex nested - COMMA between arguments"
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 2)  # Power-like operator - COMMA between field and parameter"
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 - OPERATOR2(DATA_FIELD1, 20))  # Absolute deviation - COMMA in nested operator"
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 * DATA_FIELD2, 10)  # Rank of product - COMMA before parameter"
+            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 / DATA_FIELD2, 3)  # Winsorized ratio - COMMA before parameter"
+            user_prompt += "\n  - OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1)), DATA_FIELD2)  # Complex nested - COMMA between arguments"
+            user_prompt += "\n\nCRITICAL: Use OPERATOR1, OPERATOR2, etc. for operators and DATA_FIELD1, DATA_FIELD2, etc. for fields!"
+            user_prompt += "\nExample format: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
         elif available_fields and len(available_fields) > 0:
             # Fallback: Use actual field IDs (old approach)
             example_fields = [f.get('id', '') for f in available_fields[:6] if f.get('id')]
@@ -817,30 +1223,28 @@ CRITICAL FASTEXPR SYNTAX RULES:
             user_prompt += "\nGenerate a NEW and DIFFERENT expression, not similar to the ones above."
         
         user_prompt += "\n\nDIVERSITY REQUIREMENTS:"
-        user_prompt += "\n- Use DIFFERENT operators each time (avoid repeating ts_rank, ts_rank, ts_rank...)"
-        user_prompt += "\n- Mix arithmetic operators: +, -, *, /, ^, power, signed_power, abs, log, sqrt"
-        user_prompt += "\n- Use cross-sectional operators: winsorize, zscore, rank, delta"
-        user_prompt += "\n- Combine operators creatively: e.g., winsorize(DATA_FIELD1 + DATA_FIELD2, 4) or power(abs(DATA_FIELD1), 0.5)"
+        user_prompt += "\n- Use DIFFERENT operators each time (avoid repeating OPERATOR1, OPERATOR1, OPERATOR1...)"
+        user_prompt += "\n- Mix different operator types from the AVAILABLE OPERATORS list"
+        user_prompt += "\n- Combine operators creatively: e.g., OPERATOR1(DATA_FIELD1 + DATA_FIELD2, 4) or OPERATOR1(OPERATOR2(DATA_FIELD1), 0.5)"
+        user_prompt += "\n- Use arithmetic operators when appropriate: +, -, *, /"
         user_prompt += "\n- Use logical operators when appropriate: >, <, >=, <=, ==, !=, &&, ||"
-        user_prompt += "\n- CRITICAL: Use COMMAS for operator parameters: ts_rank(DATA_FIELD1, 20) NOT ts_rank(DATA_FIELD1 20)"
+        user_prompt += "\n- CRITICAL: Use COMMAS for operator parameters: OPERATOR1(DATA_FIELD1, 20) NOT OPERATOR1(DATA_FIELD1 20)"
         
         user_prompt += "\n\n🚨 CRITICAL: MAXIMUM 5 OPERATORS - NO EXCEPTIONS!"
-        user_prompt += "\n- Count operators carefully: ts_rank, rank, normalize, log, abs, winsorize, etc. - each counts as 1 operator"
+        user_prompt += "\n- Count operators carefully: each OPERATOR1, OPERATOR2, etc. counts as 1 operator"
         user_prompt += "\n- Arithmetic operators (+, -, *, /) also count as operators"
-        user_prompt += "\n- Example with 3 operators: rank(normalize(log(DATA_FIELD1))) - rank(1) + normalize(1) + log(1) = 3 operators"
-        user_prompt += "\n- Example with 5 operators: ts_rank(winsorize(normalize(log(abs(DATA_FIELD1))), 4), 20) - exactly 5 operators"
+        user_prompt += "\n- Example with 3 operators: OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1))) = 3 operators"
+        user_prompt += "\n- Example with 5 operators: OPERATOR1(OPERATOR2(OPERATOR3(OPERATOR4(OPERATOR5(DATA_FIELD1)))), 4) = exactly 5 operators"
         user_prompt += "\n- DO NOT exceed 5 operators - if you need more, simplify the expression!"
         user_prompt += "\n\n🚨 CRITICAL: NO CONSECUTIVE DUPLICATE OPERATORS!"
-        user_prompt += "\n- DO NOT nest the same operator multiple times: ts_step(ts_step(ts_step(...))) is FORBIDDEN"
-        user_prompt += "\n- DO NOT use: ts_count_nans(ts_count_nans(ts_count_nans(...))) - this is FORBIDDEN"
-        user_prompt += "\n- DO NOT use: hump(hump(hump(...))) - this is FORBIDDEN"
-        user_prompt += "\n- Each operator should appear only ONCE in the expression, or at most in different contexts (not nested)"
-        user_prompt += "\n- Example of FORBIDDEN: ts_step(ts_step(ts_step(field))) - REJECTED"
-        user_prompt += "\n- Example of ALLOWED: ts_step(field, 20) + ts_step(field, 10) - different contexts, OK"
+        user_prompt += "\n- DO NOT nest the same operator placeholder multiple times: OPERATOR1(OPERATOR1(OPERATOR1(...))) is FORBIDDEN"
+        user_prompt += "\n- Each operator placeholder should appear only ONCE in the expression, or at most in different contexts (not nested)"
+        user_prompt += "\n- Example of FORBIDDEN: OPERATOR1(OPERATOR1(OPERATOR1(DATA_FIELD1))) - REJECTED"
+        user_prompt += "\n- Example of ALLOWED: OPERATOR1(DATA_FIELD1, 20) + OPERATOR1(DATA_FIELD2, 10) - different contexts, OK"
         user_prompt += "\n\nGenerate a SIMPLE, valid FASTEXPR expression using MAXIMUM 5 operators total. Keep it simple - avoid deep nesting."
-        user_prompt += "\nUse COMMAS for parameters: operator(field, param). Return ONLY the expression:"
-        user_prompt += "\n\n🚨 CRITICAL: Return ONLY the FASTEXPR expression. NO natural language, NO explanations, NO 'Let's generate...', NO 'We'll focus...'."
-        user_prompt += "\nJust return the pure expression like: rank(normalize(log(DATA_FIELD1)), 4)"
+        user_prompt += "\nUse COMMAS for parameters: OPERATOR1(DATA_FIELD1, param). Return ONLY the expression:"
+        user_prompt += "\n\n🚨 CRITICAL: Return ONLY the FASTEXPR expression with placeholders. NO natural language, NO explanations, NO 'Let's generate...', NO 'We'll focus...'."
+        user_prompt += "\nJust return the pure expression with placeholders like: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
         
         # Debug: Log that we're about to call generate
         logger.debug(f"Calling Ollama generate() with prompt length: {len(user_prompt)}")

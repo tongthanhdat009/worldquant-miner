@@ -174,22 +174,12 @@ class CyberpunkGUI:
                 logger.error("No authenticated session available")
                 return
             
-            # Create temporary credential file for generator (in memory approach would be better)
-            # For now, we'll pass credentials directly if possible
-            # Note: This is a workaround - ideally generator should accept session directly
-            import tempfile
-            temp_cred_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+            # Pass credentials directly to avoid temp file issues with re-authentication
             creds = self.credential_manager.get_credentials()
-            json.dump([creds.username, creds.password], temp_cred_file)
-            temp_cred_file.close()
+            credentials = [creds.username, creds.password]
             
-            self.generator = EnhancedTemplateGeneratorV3(credentials_path=temp_cred_file.name)
-            
-            # Clean up temp file after generator reads it
-            try:
-                os.unlink(temp_cred_file.name)
-            except:
-                pass
+            # Pass credentials directly (no temp file needed)
+            self.generator = EnhancedTemplateGeneratorV3(credentials=credentials)
                 
         except Exception as e:
             logger.error(f"Failed to initialize generator: {e}", exc_info=True)

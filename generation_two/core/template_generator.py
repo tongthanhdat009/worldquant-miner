@@ -27,6 +27,7 @@ class TemplateGenerator:
     def __init__(
         self, 
         credentials_path: str = None, 
+        credentials: List[str] = None,  # New: allow passing credentials directly
         deepseek_api_key: str = None,
         ollama_url: str = "http://localhost:11434",
         ollama_model: str = "qwen2.5-coder:1.5b",
@@ -36,13 +37,15 @@ class TemplateGenerator:
         Initialize template generator
         
         Args:
-            credentials_path: Path to WorldQuant Brain credentials
+            credentials_path: Path to WorldQuant Brain credentials file
+            credentials: Direct credentials as [username, password] (takes precedence over credentials_path)
             deepseek_api_key: DeepSeek API key for LLM generation
             ollama_url: Ollama server URL
             ollama_model: Ollama model name
             db_path: Path to database for storing compiler knowledge
         """
         self.credentials_path = credentials_path
+        self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
         # Create session with cookie persistence enabled (default, but explicit)
@@ -70,7 +73,7 @@ class TemplateGenerator:
         self.data_field_fetcher = None
         self.search_engine = None
         
-        if credentials_path:
+        if credentials_path or credentials:
             self.setup_auth()
             self._setup_data_fetchers()
     
@@ -79,11 +82,29 @@ class TemplateGenerator:
         try:
             from requests.auth import HTTPBasicAuth
             
-            with open(self.credentials_path, 'r') as f:
-                credentials = json.loads(f.read().strip())
-            
-            username = credentials[0]
-            password = credentials[1]
+            # Try to get credentials from memory first (for re-authentication)
+            if self._stored_credentials:
+                username = self._stored_credentials[0]
+                password = self._stored_credentials[1]
+            elif self.credentials_path:
+                # Try to read from file
+                try:
+                    with open(self.credentials_path, 'r') as f:
+                        credentials = json.loads(f.read().strip())
+                    username = credentials[0]
+                    password = credentials[1]
+                    # Store in memory for future re-authentication
+                    self._stored_credentials = [username, password]
+                except FileNotFoundError:
+                    # File was deleted (e.g., temp file), try to use stored credentials
+                    if self._stored_credentials:
+                        username = self._stored_credentials[0]
+                        password = self._stored_credentials[1]
+                        logger.warning("Credentials file not found, using stored credentials from memory")
+                    else:
+                        raise Exception("Credentials file not found and no stored credentials available")
+            else:
+                raise Exception("No credentials provided (neither credentials_path nor credentials)")
             
             # Log credentials (masked for security)
             logger.info(f"Authenticating with username: {username}")
@@ -754,7 +775,9 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             use_placeholder_fields=True  # Enable V2 placeholder approach
                         )
                     
-                    # Step 4: Replace placeholders with actual field IDs
+                    # Step 4: Replace placeholders with actual operator names and field IDs
+                    if template and selected_operators:
+                        template = self._replace_operator_placeholders(template, selected_operators)
                     if template and selected_fields:
                         template = self._replace_field_placeholders(template, selected_fields, region)
                     
@@ -922,6 +945,40 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
         
         if result != template:
             logger.info(f"✅ Field placeholder replacement ({len(replacements_made)} replacements): {template[:50]}... -> {result[:50]}...")
+        
+        return result
+    
+    def _replace_operator_placeholders(self, template: str, selected_operators: List[Dict]) -> str:
+        """V3 Approach: Replace OPERATOR1, OPERATOR2, etc. with actual operator names"""
+        import re
+        
+        if not template or not selected_operators:
+            return template
+        
+        # Create operator mapping: OPERATOR1 -> first operator, OPERATOR2 -> second operator, etc.
+        # Support both uppercase (OPERATOR1) and lowercase (operator1) variants
+        operator_mapping = {}
+        for i, op in enumerate(selected_operators[:10], start=1):  # Support up to OPERATOR10
+            operator_name = op.get('name', '')
+            if operator_name:
+                # Map both uppercase and lowercase variants
+                operator_mapping[f'OPERATOR{i}'] = operator_name
+                operator_mapping[f'operator{i}'] = operator_name
+                operator_mapping[f'Operator{i}'] = operator_name
+        
+        # Replace placeholders with actual operator names (word boundary to avoid partial matches)
+        result = template
+        replacements_made = []
+        for placeholder, actual_operator in operator_mapping.items():
+            # Use word boundary to ensure exact match, case-insensitive
+            pattern = r'\b' + re.escape(placeholder) + r'\b'
+            if re.search(pattern, result, flags=re.IGNORECASE):
+                result = re.sub(pattern, actual_operator, result, flags=re.IGNORECASE)
+                replacements_made.append(f"{placeholder} -> {actual_operator}")
+                logger.debug(f"Replaced {placeholder} -> {actual_operator}")
+        
+        if result != template:
+            logger.info(f"✅ Operator placeholder replacement ({len(replacements_made)} replacements): {template[:50]}... -> {result[:50]}...")
         
         return result
 

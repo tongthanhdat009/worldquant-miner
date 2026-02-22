@@ -1,0 +1,78 @@
+from .market_adapter import MarketDataAdapter, MarketSnapshot
+
+
+class MockPolymarketAdapter(MarketDataAdapter):
+    """Deterministic adapter for local development and tests."""
+
+    def fetch_markets(self) -> list[MarketSnapshot]:
+        return [
+            MarketSnapshot(
+                "election-2028-dem-win",
+                "Will Democrats win 2028 election?",
+                "US Elections",
+                "global elections",
+                0.46,
+                30_000.0,
+                8_500.0,
+                "101",
+                0.46,
+                "2028-11-08T00:00:00Z",
+                "2028-11-08T00:00:00Z",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            MarketSnapshot(
+                "fed-cut-june",
+                "Will Fed cut rates in June?",
+                "Fed Decision",
+                "fed",
+                0.59,
+                20_000.0,
+                6_200.0,
+                "102",
+                0.59,
+                "2026-06-30T00:00:00Z",
+                "2026-06-30T00:00:00Z",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            MarketSnapshot(
+                "btc-100k-2026",
+                "Will BTC hit 100k in 2026?",
+                "Crypto Prices",
+                "crypto prices",
+                0.33,
+                45_000.0,
+                12_700.0,
+                "103",
+                0.33,
+                "2026-12-31T00:00:00Z",
+                "2026-12-31T00:00:00Z",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            MarketSnapshot(
+                "us-recession-2026",
+                "US recession by end of 2026?",
+                "Macro",
+                "equities",
+                0.41,
+                12_000.0,
+                3_900.0,
+                "104",
+                0.41,
+                "2026-12-31T00:00:00Z",
+                "2026-12-31T00:00:00Z",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+        ]
+

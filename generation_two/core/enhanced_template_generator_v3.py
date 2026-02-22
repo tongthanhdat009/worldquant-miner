@@ -33,7 +33,8 @@ class EnhancedTemplateGeneratorV3:
     
     def __init__(
         self, 
-        credentials_path: str,
+        credentials_path: str = None,
+        credentials: List[str] = None,  # New: allow passing credentials directly
         deepseek_api_key: str = None,
         db_path: str = "generation_two_backtests.db",
         ollama_url: str = "http://localhost:11434",
@@ -43,7 +44,8 @@ class EnhancedTemplateGeneratorV3:
         Initialize Generation Two system
         
         Args:
-            credentials_path: Path to WorldQuant Brain credentials
+            credentials_path: Path to WorldQuant Brain credentials file
+            credentials: Direct credentials as [username, password] (takes precedence over credentials_path)
             deepseek_api_key: DeepSeek API key for template generation
             db_path: Path to backtest storage database
             ollama_url: Ollama server URL
@@ -51,8 +53,9 @@ class EnhancedTemplateGeneratorV3:
         """
         # Initialize modular components with Ollama support
         self.template_generator = TemplateGenerator(
-            credentials_path, 
-            deepseek_api_key,
+            credentials_path=credentials_path,
+            credentials=credentials,  # Pass credentials directly
+            deepseek_api_key=deepseek_api_key,
             ollama_url=ollama_url,
             ollama_model=ollama_model,
             db_path=db_path  # Pass database path to template generator
@@ -67,7 +70,9 @@ class EnhancedTemplateGeneratorV3:
         # Setup simulator tester (needs session and region configs)
         import requests
         # Use the same session from template_generator to maintain authentication cookies
-        self.template_generator.setup_auth()
+        # setup_auth() was already called in TemplateGenerator.__init__, but call again to ensure session is ready
+        if credentials_path or credentials:
+            self.template_generator.setup_auth()
         self.session = self.template_generator.sess  # Reuse authenticated session
         
         # Region configurations

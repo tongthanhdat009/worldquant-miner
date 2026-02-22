@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Polymarket Quant Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #111826;
+      --panel-2: #0f1724;
+      --line: #223047;
+      --text: #e8eef8;
+      --muted: #93a4bf;
+      --accent: #3b82f6;
+      --green: #22c55e;
+      --red: #ef4444;
+      --orange: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .app { display: grid; grid-template-columns: 360px 1fr; min-height: 100vh; }
+    .sidebar { border-right: 1px solid var(--line); background: var(--panel); padding: 16px; }
+    .main { padding: 16px; }
+    .title { font-size: 20px; font-weight: 700; margin: 0 0 4px; }
+    .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+    .build { color: var(--muted); font-size: 11px; margin-bottom: 14px; }
+    .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+    .card h3 { margin: 0 0 8px; font-size: 14px; }
+    label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 12px; }
+    input, select, button {
+      width: 100%; border-radius: 8px; border: 1px solid #2a3a55; background: #0a1220;
+      color: var(--text); padding: 8px; font-size: 13px;
+    }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button { cursor: pointer; background: var(--accent); border: none; font-weight: 600; }
+    button.secondary { background: #334155; }
+    .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 11px; border: 1px solid #335075; background: #10213b; color: #9bc1ff; margin-right: 6px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+    .tab-btn { width: auto; padding: 8px 12px; border-radius: 10px; border: 1px solid #2a3a55; background: #101a2b; color: var(--muted); }
+    .tab-btn.active { color: white; border-color: #3b82f6; background: #17315f; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .metric { background: #101827; border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+    .metric .k { color: var(--muted); font-size: 11px; }
+    .metric .v { font-size: 18px; font-weight: 700; margin-top: 4px; }
+    .chart-toolbar { display: grid; grid-template-columns: 140px 140px 1fr; gap: 8px; margin-bottom: 8px; }
+    .chart-block { background: #0d1420; border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+    .chart-title { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .tv-chart { width: 100%; border-radius: 6px; background: #09111c; overflow: hidden; }
+    #main_chart { height: 340px; }
+    #dd_chart, #pnl_chart { height: 120px; margin-top: 8px; }
+    .market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+    .mcard { background: #0f1724; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .mhead { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
+    .mquestion { font-size: 13px; line-height: 1.3; }
+    .mtags { margin-top: 6px; }
+    .tag { display: inline-block; font-size: 10px; color: #9fb7d8; border: 1px solid #2b4264; border-radius: 999px; padding: 2px 6px; margin-right: 4px; }
+    .mstats { margin-top: 8px; font-size: 11px; color: var(--muted); display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .status { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    textarea {
+      width: 100%;
+      border-radius: 8px;
+      border: 1px solid #2a3a55;
+      background: #0a1220;
+      color: var(--text);
+      padding: 8px;
+      font-size: 12px;
+      min-height: 68px;
+      resize: vertical;
+      font-family: Consolas, monospace;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border: 1px solid #223248; padding: 6px; text-align: left; vertical-align: top; }
+    th { background: #142034; color: #a9bdd8; }
+    .scroll { max-height: 62vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+    .pager { display: flex; gap: 8px; align-items: center; margin: 8px 0; color: var(--muted); font-size: 12px; }
+    .pager button { width: auto; padding: 6px 10px; font-size: 12px; }
+    .pager select { width: auto; padding: 6px 8px; font-size: 12px; }
+    .mono { font-family: Consolas, monospace; }
+    .exposure-wrap { margin: 10px 0 8px; }
+    .exposure-head { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .exposure-meter {
+      width: 100%;
+      height: 14px;
+      border-radius: 999px;
+      background: #1b2433;
+      border: 1px solid #2a3a55;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 50% 50%;
+    }
+    .exp-short { background: linear-gradient(90deg, #ef4444 0%, #f87171 100%); justify-self: end; }
+    .exp-long { background: linear-gradient(90deg, #4ade80 0%, #22c55e 100%); justify-self: start; }
+    .math-note {
+      margin: 8px 0 10px;
+      padding: 8px 10px;
+      border: 1px dashed #375073;
+      border-radius: 8px;
+      background: #0a1322;
+      color: #9eb0c8;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .math-note code { color: #c7dbff; }
+    .trace-strip {
+      margin: 8px 0 10px;
+      border: 1px solid #2b4264;
+      border-radius: 8px;
+      background: #0a1322;
+      padding: 8px 10px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(150px, 1fr));
+      gap: 8px;
+      color: #b7c9e1;
+      font-size: 12px;
+    }
+    .trace-strip .label { color: #8fa4c2; font-size: 11px; }
+    #trace_box {
+      width: 100%;
+      min-height: 260px;
+      background: #09111c;
+      border: 1px solid #223248;
+      color: #c7dbff;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="title">Polymarket Quant</div>
+      <div class="subtitle">Chart-first backtest lab with real market replay.</div>
+      <div class="build">Build: {{ build_id }} | Real data only: enabled</div>
+
+      <div class="card">
+        <h3>1) Universe</h3>
+        <label>Category</label>
+        <select id="category"></select>
+        <label>Search</label>
+        <input id="search" type="text" placeholder="Iran, Fed, BTC, Oscars..." />
+        <div class="row2" style="margin-top: 8px;">
+          <button class="secondary" onclick="loadMarkets()">Refresh</button>
+          <button class="secondary" onclick="selectAllVisible()">Select All</button>
+        </div>
+        <div class="pager">
+          <button class="secondary" onclick="prevMarketPage()">Prev</button>
+          <button class="secondary" onclick="nextMarketPage()">Next</button>
+          <select id="market_page_size" onchange="resetMarketPageAndReload()">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="400">400</option>
+          </select>
+          <span id="market_page_info">Page 1</span>
+        </div>
+        <label style="margin-top: 10px;">Universe Mode</label>
+        <select id="universe_mode">
+          <option value="selected">Selected only</option>
+          <option value="filtered">All filtered results</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <h3>2) Backtest Setup</h3>
+        <label>Horizon (days)</label>
+        <input id="timeframe_days" type="number" value="30" min="1" max="3650" />
+        <label>Bar Interval (hours)</label>
+        <input id="bar_interval_hours" type="number" value="24" min="1" max="168" />
+        <label>Replay Mode</label>
+        <select id="replay_mode">
+          <option value="settlement_only">Settlement only (default)</option>
+          <option value="mark_to_market">Mark-to-market (synthetic)</option>
+        </select>
+        <label>Initial Capital USD</label>
+        <input id="initial_capital_usd" type="number" value="10000" />
+        <label>Min Liquidity</label>
+        <input id="min_liquidity" type="number" value="1000" />
+        <div class="row2">
+          <div>
+            <label>Max Position</label>
+            <input id="max_position" type="number" value="0.10" step="0.01" />
+          </div>
+          <div>
+            <label>Signal Threshold</label>
+            <input id="signal_threshold" type="number" value="0.05" step="0.01" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>3) Strategy</h3>
+        <label>Strategy Preset</label>
+        <select id="strategy_name">
+          <option value="balanced">balanced</option>
+          <option value="contrarian">contrarian</option>
+          <option value="momentum">momentum</option>
+          <option value="liquidity">liquidity</option>
+        </select>
+        <label>Custom weights (optional JSON)</label>
+        <textarea id="strategy_weights" placeholder='{"edge":1.0,"momentum":0.2,"volume":0.1,"liquidity_penalty":-0.1}'></textarea>
+        <label style="margin-top: 8px;">
+          <input id="market_neutral" type="checkbox" checked style="width:auto; margin-right:6px;" />
+          Market-neutral (balance BUY_YES vs BUY_NO exposure)
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>4) Run</h3>
+        <button onclick="runBacktest()">Run Backtest</button>
+        <div class="status" id="adapter">Adapter: -</div>
+        <div class="status" id="selection_info">Selected: 0</div>
+        <div class="status" id="timeframe_info">Timeframe: -</div>
+        <div class="status" id="strategy_info">Strategy: -</div>
+        <div class="status" id="trace_info">Trace: -</div>
+        <div class="status" id="curve_mode_info">Mode: market_replay_real</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="panel_charts" onclick="switchTab('panel_charts')">Charts</button>
+        <button class="tab-btn" data-tab="panel_markets" onclick="switchTab('panel_markets')">Market Explorer</button>
+        <button class="tab-btn" data-tab="panel_strategy" onclick="switchTab('panel_strategy')">Strategy Output</button>
+        <button class="tab-btn" data-tab="panel_trades" onclick="switchTab('panel_trades')">Trades</button>
+        <button class="tab-btn" data-tab="panel_trace" onclick="switchTab('panel_trace')">Trace</button>
+      </div>
+
+      <section id="panel_charts" class="panel active">
+        <div class="metrics">
+          <div class="metric"><div class="k">Signal Score (Model)</div><div id="m_return" class="v">-</div></div>
+          <div class="metric"><div class="k">Replay Avg Return</div><div id="m_avg" class="v">-</div></div>
+          <div class="metric"><div class="k">Replay Min Return</div><div id="m_min" class="v">-</div></div>
+          <div class="metric"><div class="k">Replay PnL USD</div><div id="m_pnl" class="v">-</div></div>
+        </div>
+        <div class="chart-toolbar">
+          <select id="chart_style"><option value="candles">Candles</option><option value="line">Line</option></select>
+          <select id="aggregation">
+            <option value="auto">Auto timeframe</option>
+            <option value="raw">Base bars</option>
+            <option value="1h">1h</option>
+            <option value="4h">4h</option>
+            <option value="12h">12h</option>
+            <option value="24h">1d</option>
+            <option value="72h">3d</option>
+            <option value="168h">1w</option>
+            <option value="336h">2w</option>
+          </select>
+          <input id="chart_note" type="text" value="TradingView-style equity / drawdown / PnL panels" readonly />
+        </div>
+        <details class="math-note">
+          <summary>Replay Math Mode (click to expand)</summary>
+          <div style="margin-top:6px;">
+            Replay PnL uses Polymarket change fields as return-like deltas:
+            <code>PnL = notional_usd * side * price_change</code>.
+            <br />
+            Side mapping: <code>BUY_YES = +1</code>, <code>BUY_NO = -1</code>.
+            <br />
+            Replay path realizes each trade using its real expiry date (earlier-expiring events impact PnL earlier).
+            <br />
+            Model metrics are expectation-based; replay metrics are path-realized from market change fields.
+          </div>
+        </details>
+        <div class="trace-strip">
+          <div><div class="label">Trace Replay PnL</div><div id="trace_replay_chart">-</div></div>
+          <div><div class="label">Trace Signal Score</div><div id="trace_model_chart">-</div></div>
+          <div><div class="label">Best/Worst Step</div><div id="trace_step_chart">-</div></div>
+        </div>
+        <div class="chart-block">
+          <div class="exposure-wrap">
+            <div class="exposure-head">
+              <span id="exp_long">Long: -</span>
+              <span id="exp_short">Short: -</span>
+              <span id="exp_net">Net: -</span>
+              <span id="exp_trace_replay">Trace Replay: -</span>
+              <span id="exp_trace_model">Trace Model: -</span>
+              <span id="exp_trace_steps">Step +/-: -</span>
+            </div>
+            <div class="exposure-meter">
+              <div id="exp_short_bar" class="exp-short" style="width:0%"></div>
+              <div id="exp_long_bar" class="exp-long" style="width:0%"></div>
+            </div>
+          </div>
+          <div class="chart-title">Equity</div>
+          <div id="main_chart" class="tv-chart"></div>
+          <div class="chart-title">Drawdown</div>
+          <div id="dd_chart" class="tv-chart"></div>
+          <div class="chart-title">Step PnL Histogram</div>
+          <div id="pnl_chart" class="tv-chart"></div>
+        </div>
+      </section>
+
+      <section id="panel_markets" class="panel">
+        <div class="market-grid" id="market_grid"></div>
+      </section>
+
+      <section id="panel_strategy" class="panel">
+        <div class="scroll">
+          <table id="strategy_table">
+            <thead>
+              <tr>
+                <th>Question</th><th>Category</th><th>Market</th><th>Score</th><th>Edge</th><th>Momentum</th><th>Volume</th><th>Liquidity Penalty</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="panel_trades" class="panel">
+        <div class="pager">
+          <button class="secondary" onclick="prevTradePage()">Prev</button>
+          <button class="secondary" onclick="nextTradePage()">Next</button>
+          <select id="trade_page_size" onchange="renderTrades(lastTrades)">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+          <span id="trade_page_info">Page 1</span>
+        </div>
+        <div class="scroll">
+          <table id="trades_table">
+            <thead>
+              <tr>
+                <th>Question</th><th>Category</th><th>Market</th><th>Side</th><th>Weight</th><th>Edge</th><th>Notional</th><th>Signal Score</th><th>Replay PnL</th><th>P/L (Replay)</th><th>Expiry (UTC)</th><th>Cash-out (UTC)</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="panel_trace" class="panel">
+        <div id="trace_box">Run backtest to populate trace logs.</div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    let marketCache = [];
+    let lastTrades = [];
+    let selected = new Set();
+    let lastCurve = [];
+    let mainChart = null;
+    let ddChart = null;
+    let pnlChart = null;
+    let mainSeries = null;
+    let mainSeriesType = '';
+    let ddSeries = null;
+    let pnlSeries = null;
+    let lastBarIntervalHours = 24;
+    let marketOffset = 0;
+    let marketTotalCount = 0;
+    let tradePage = 0;
+
+    function switchTab(id) {
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+      document.querySelector(`.tab-btn[data-tab="${id}"]`).classList.add('active');
+    }
+
+    function selectedIds() { return Array.from(selected); }
+    function updateSelectionInfo() { document.getElementById('selection_info').innerText = `Selected: ${selected.size}`; }
+
+    function selectAllVisible() {
+      marketCache.forEach(row => selected.add(String(row.market_id)));
+      renderMarketCards(marketCache);
+      updateSelectionInfo();
+    }
+
+    function resetMarketPageAndReload() {
+      marketOffset = 0;
+      loadMarkets();
+    }
+
+    function prevMarketPage() {
+      const size = Number(document.getElementById('market_page_size').value || 100);
+      marketOffset = Math.max(0, marketOffset - size);
+      loadMarkets();
+    }
+
+    function nextMarketPage() {
+      const size = Number(document.getElementById('market_page_size').value || 100);
+      if (marketOffset + size >= marketTotalCount) return;
+      marketOffset += size;
+      loadMarkets();
+    }
+
+    function buildCategories(items, preserve) {
+      const sel = document.getElementById('category');
+      const current = preserve || sel.value || 'all';
+      sel.innerHTML = '';
+      items.forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = item.name;
+        opt.textContent = `${item.name} (${item.count})`;
+        sel.appendChild(opt);
+      });
+      if ([...sel.options].some(x => x.value === current)) sel.value = current;
+      sel.onchange = () => loadMarkets();
+    }
+
+    async function loadMarkets() {
+      const category = document.getElementById('category').value || 'all';
+      const search = encodeURIComponent(document.getElementById('search').value || '');
+      const limit = Number(document.getElementById('market_page_size').value || 100);
+      const res = await fetch(`/api/markets?limit=${limit}&offset=${marketOffset}&category=${encodeURIComponent(category)}&search=${search}`);
+      const data = await res.json();
+      document.getElementById('adapter').innerText = `Adapter: ${data.adapter} | Source: ${data.data_source} | Mock: ${data.is_mock}`;
+      buildCategories(data.categories, category);
+      marketCache = data.markets;
+      marketTotalCount = Number(data.total_count || data.count || marketCache.length);
+      renderMarketCards(marketCache);
+      updateSelectionInfo();
+      updateMarketPageInfo(limit);
+    }
+
+    function updateMarketPageInfo(size) {
+      const page = Math.floor(marketOffset / Math.max(1, size)) + 1;
+      const totalPages = Math.max(1, Math.ceil(marketTotalCount / Math.max(1, size)));
+      if (marketTotalCount <= 0) {
+        document.getElementById('market_page_info').innerText = 'Page 1/1 (0 of 0)';
+        return;
+      }
+      const end = Math.min(marketTotalCount, marketOffset + size);
+      const text = `Page ${page}/${totalPages} (${marketOffset + 1}-${end} of ${marketTotalCount})`;
+      document.getElementById('market_page_info').innerText = text;
+    }
+
+    function renderMarketCards(rows) {
+      const box = document.getElementById('market_grid');
+      box.innerHTML = '';
+      rows.forEach(row => {
+        const checked = selected.has(String(row.market_id)) ? 'checked' : '';
+        box.innerHTML += `
+          <div class="mcard">
+            <div class="mhead">
+              <input type="checkbox" style="width:auto" ${checked} onchange="toggleMarket('${row.market_id}', this.checked)" />
+              <div>
+                <div class="mquestion">${row.question}</div>
+                <div class="mtags">
+                  <span class="tag">${row.category}</span>
+                  <span class="tag mono">${row.market_id}</span>
+                </div>
+              </div>
+            </div>
+            <div class="mstats">
+              <div>Prob: ${Number(row.probability).toFixed(4)}</div>
+              <div>Edge: ${Number(row.odds_edge).toFixed(4)}</div>
+              <div>Liq: ${Number(row.liquidity).toFixed(2)}</div>
+              <div>Vol24h: ${Number(row.volume_24h).toFixed(2)}</div>
+              <div>Expiry: ${row.expiration_iso || '-'}</div>
+              <div>Cash-out: ${row.cashout_iso || '-'}</div>
+            </div>
+          </div>`;
+      });
+    }
+
+    function toggleMarket(marketId, checked) {
+      const id = String(marketId);
+      if (checked) selected.add(id); else selected.delete(id);
+      updateSelectionInfo();
+    }
+
+    async function runBacktest() {
+      const universeMode = document.getElementById('universe_mode').value;
+      const strategyWeights = parseStrategyWeights();
+      const payload = {
+        timeframe_days: Number(document.getElementById('timeframe_days').value),
+        bar_interval_hours: Number(document.getElementById('bar_interval_hours').value),
+        min_liquidity: Number(document.getElementById('min_liquidity').value),
+        max_position: Number(document.getElementById('max_position').value),
+        signal_threshold: Number(document.getElementById('signal_threshold').value),
+        initial_capital_usd: Number(document.getElementById('initial_capital_usd').value),
+        category: document.getElementById('category').value || 'all',
+        search: document.getElementById('search').value || '',
+        selected_market_ids: universeMode === 'selected' ? selectedIds() : [],
+        strategy_name: document.getElementById('strategy_name').value || 'balanced',
+        strategy_weights: strategyWeights,
+        market_neutral: document.getElementById('market_neutral').checked,
+        replay_mode: document.getElementById('replay_mode').value || 'settlement_only',
+      };
+      const res = await fetch('/api/backtest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      document.getElementById('adapter').innerText = `Adapter: ${data.adapter} | Source: ${data.data_source} | Mock: ${data.is_mock}`;
+      document.getElementById('m_return').innerText = Number(data.metrics.model_expected_return).toFixed(4);
+      document.getElementById('m_avg').innerText = Number(data.backtest.avg_expected_return).toFixed(4);
+      document.getElementById('m_min').innerText = Number(data.backtest.min_expected_return).toFixed(4);
+      document.getElementById('m_pnl').innerText = Number(data.metrics.replay_final_pnl_usd).toFixed(2);
+      lastCurve = data.pnl_curve || [];
+      lastBarIntervalHours = Number(data.timeframe.bar_interval_hours || 24);
+      renderTradingPanels(lastCurve);
+      renderExposureMeter(data.exposure || null);
+      tradePage = 0;
+      lastTrades = data.trade_summary.trades || [];
+      renderTrades(lastTrades);
+      renderStrategyOutput(data.strategy_output.rows || []);
+      renderTrace(data.trace || null);
+      document.getElementById('selection_info').innerText =
+        `Selected: ${data.selection.selected_count} | Universe: ${data.selection.universe_size} | Mode: ${universeMode}`;
+      document.getElementById('timeframe_info').innerText =
+        `Timeframe: ${data.timeframe.days}d @ ${data.timeframe.bar_interval_hours}h (${data.timeframe.curve_steps} steps)`;
+      document.getElementById('strategy_info').innerText =
+        `Strategy: ${data.strategy.name} | neutral=${data.strategy.market_neutral} | w=${JSON.stringify(data.strategy.weights)}`;
+      document.getElementById('trace_info').innerText =
+        `Trace: positions=${data.trace?.positions?.count ?? 0}, replay_pnl=${Number(data.trace?.totals?.replay_final_pnl_usd ?? 0).toFixed(2)}, signal_score=${Number(data.trace?.totals?.model_signal_score ?? 0).toFixed(4)}, reconcile_err=${Number(data.trace?.totals?.replay_reconcile_error_usd ?? 0).toFixed(4)}`;
+      document.getElementById('curve_mode_info').innerText =
+        `Mode: ${data.backtest_mode} | Replay: ${data.replay_mode}`;
+    }
+
+    function renderTrades(rows) {
+      const pageSize = Number(document.getElementById('trade_page_size').value || 100);
+      const total = rows.length;
+      const totalPages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
+      tradePage = Math.max(0, Math.min(tradePage, totalPages - 1));
+      let start = 0;
+      let end = 0;
+      if (total <= 0) {
+        document.getElementById('trade_page_info').innerText = 'Page 1/1 (0 of 0)';
+      } else {
+        start = tradePage * pageSize;
+        end = Math.min(total, start + pageSize);
+        document.getElementById('trade_page_info').innerText = `Page ${tradePage + 1}/${totalPages} (${start + 1}-${end} of ${total})`;
+      }
+      const body = document.querySelector('#trades_table tbody');
+      body.innerHTML = '';
+      rows.slice(start, end).forEach(row => {
+        body.innerHTML += `<tr>
+          <td>${row.question}</td>
+          <td>${row.category}</td>
+          <td class="mono">${row.market_id}</td>
+          <td>${row.side || '-'}</td>
+          <td>${Number(row.weight).toFixed(4)}</td>
+          <td>${Number(row.expected_edge).toFixed(4)}</td>
+          <td>${Number(row.notional_usd).toFixed(2)}</td>
+          <td>${Number(row.signal_score ?? row.model_pnl_usd ?? 0).toFixed(4)}</td>
+          <td>${Number(row.replay_pnl_usd || 0).toFixed(2)}</td>
+          <td>${row.pnl_class}</td>
+          <td>${row.expiration_iso || '-'}</td>
+          <td>${row.cashout_iso || '-'}</td>
+        </tr>`;
+      });
+    }
+
+    function prevTradePage() {
+      tradePage = Math.max(0, tradePage - 1);
+      renderTrades(lastTrades);
+    }
+
+    function nextTradePage() {
+      const pageSize = Number(document.getElementById('trade_page_size').value || 100);
+      const totalPages = Math.max(1, Math.ceil((lastTrades?.length || 0) / Math.max(1, pageSize)));
+      tradePage = Math.min(totalPages - 1, tradePage + 1);
+      renderTrades(lastTrades);
+    }
+
+    function renderStrategyOutput(rows) {
+      const body = document.querySelector('#strategy_table tbody');
+      body.innerHTML = '';
+      rows.forEach(row => {
+        body.innerHTML += `<tr>
+          <td>${row.question}</td>
+          <td>${row.category}</td>
+          <td class="mono">${row.market_id}</td>
+          <td>${Number(row.score).toFixed(4)}</td>
+          <td>${Number(row.edge).toFixed(4)}</td>
+          <td>${Number(row.momentum).toFixed(4)}</td>
+          <td>${Number(row.volume).toFixed(4)}</td>
+          <td>${Number(row.liquidity_penalty).toFixed(4)}</td>
+        </tr>`;
+      });
+    }
+
+    function renderExposureMeter(exposure) {
+      const longEl = document.getElementById('exp_long');
+      const shortEl = document.getElementById('exp_short');
+      const netEl = document.getElementById('exp_net');
+      const longBar = document.getElementById('exp_long_bar');
+      const shortBar = document.getElementById('exp_short_bar');
+      if (!exposure) {
+        longEl.innerText = 'Long: -';
+        shortEl.innerText = 'Short: -';
+        netEl.innerText = 'Net: -';
+        longBar.style.width = '0%';
+        shortBar.style.width = '0%';
+        return;
+      }
+      const longGross = Number(exposure.gross_long || 0);
+      const shortGross = Number(exposure.gross_short || 0);
+      const gross = Math.max(1e-9, Number(exposure.gross_total || 0));
+      const netPctGross = Number(exposure.net_pct_gross || 0) * 100;
+      const longPctSide = Math.max(0, Math.min(100, (longGross / gross) * 100));
+      const shortPctSide = Math.max(0, Math.min(100, (shortGross / gross) * 100));
+      longEl.innerText = `Long: ${(longGross * 100).toFixed(2)}% (${exposure.long_count})`;
+      shortEl.innerText = `Short: ${(shortGross * 100).toFixed(2)}% (${exposure.short_count})`;
+      netEl.innerText = `Net: ${(Number(exposure.net || 0) * 100).toFixed(2)}% | Beta drift: ${netPctGross.toFixed(2)}%`;
+      longBar.style.width = `${Math.min(100, longPctSide * 2)}%`;
+      shortBar.style.width = `${Math.min(100, shortPctSide * 2)}%`;
+    }
+
+    function renderTrace(trace) {
+      const box = document.getElementById('trace_box');
+      const replayChart = document.getElementById('trace_replay_chart');
+      const modelChart = document.getElementById('trace_model_chart');
+      const expReplay = document.getElementById('exp_trace_replay');
+      const expModel = document.getElementById('exp_trace_model');
+      if (!trace) {
+        box.textContent = 'No trace data.';
+        if (replayChart) replayChart.innerText = '-';
+        if (modelChart) modelChart.innerText = '-';
+        if (expReplay) expReplay.innerText = 'Trace Replay: -';
+        if (expModel) expModel.innerText = 'Trace Model: -';
+        return;
+      }
+      box.textContent = JSON.stringify(trace, null, 2);
+      const replayVal = Number(trace?.totals?.replay_final_pnl_usd ?? 0).toFixed(2);
+      const modelVal = Number(trace?.totals?.model_expected_pnl_usd ?? 0).toFixed(2);
+      if (replayChart) replayChart.innerText = replayVal;
+      if (modelChart) modelChart.innerText = Number(trace?.totals?.model_signal_score ?? trace?.totals?.model_expected_pnl_usd ?? 0).toFixed(4);
+      if (expReplay) expReplay.innerText = `Trace Replay: ${replayVal}`;
+      if (expModel) expModel.innerText = `Trace Signal: ${Number(trace?.totals?.model_signal_score ?? trace?.totals?.model_expected_pnl_usd ?? 0).toFixed(4)}`;
+      console.log('backtest_trace', trace);
+    }
+
+    function parseStrategyWeights() {
+      const raw = (document.getElementById('strategy_weights').value || '').trim();
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+        return parsed;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function renderTradingPanels(points) {
+      if (!points || points.length < 2) {
+        ensureCharts();
+        if (mainSeries) mainSeries.setData([]);
+        if (ddSeries) ddSeries.setData([]);
+        if (pnlSeries) pnlSeries.setData([]);
+        return;
+      }
+      const style = document.getElementById('chart_style').value;
+      const aggValue = document.getElementById('aggregation').value;
+      const baseHours = Math.max(1, Number(document.getElementById('bar_interval_hours').value) || 24);
+      const bucket = aggregationBucketFromTimeframe(points.length, aggValue, baseHours);
+      const bars = buildBars(points, bucket, baseHours);
+      const drawdown = buildDrawdownSeries(bars);
+      const baseTimeline = buildBaseTimeline(points.length, baseHours);
+      const pnl = points.slice(1).map((p, idx) => ({
+        time: baseTimeline[Math.min(idx + 1, baseTimeline.length - 1)],
+        value: Number(p.pnl),
+        color: Number(p.pnl) >= 0 ? '#22c55e' : '#ef4444'
+      }));
+      ensureCharts(style);
+      setMainSeriesData(style, bars);
+      applyMainMarkers(points, bars, bucket);
+      ddSeries.setData(drawdown);
+      pnlSeries.setData(pnl);
+    }
+
+    function applyMainMarkers(points, bars, bucket) {
+      const stepInfo = document.getElementById('trace_step_chart');
+      const expSteps = document.getElementById('exp_trace_steps');
+      if (!mainSeries || typeof mainSeries.setMarkers !== 'function' || !points || points.length < 2 || !bars.length) {
+        if (mainSeries && typeof mainSeries.setMarkers === 'function') mainSeries.setMarkers([]);
+        if (stepInfo) stepInfo.innerText = '-';
+        if (expSteps) expSteps.innerText = 'Step +/-: -';
+        return;
+      }
+      const pnlRows = points.slice(1).map((p, i) => ({ idx: i + 1, pnl: Number(p.pnl) }));
+      let best = pnlRows[0];
+      let worst = pnlRows[0];
+      pnlRows.forEach(row => {
+        if (row.pnl > best.pnl) best = row;
+        if (row.pnl < worst.pnl) worst = row;
+      });
+      const bestBarIdx = Math.min(bars.length - 1, Math.max(0, Math.floor((best.idx - 1) / Math.max(1, bucket))));
+      const worstBarIdx = Math.min(bars.length - 1, Math.max(0, Math.floor((worst.idx - 1) / Math.max(1, bucket))));
+      mainSeries.setMarkers([
+        {
+          time: bars[bestBarIdx].time,
+          position: 'belowBar',
+          color: '#22c55e',
+          shape: 'arrowUp',
+          text: `Best ${best.pnl.toFixed(2)}`,
+        },
+        {
+          time: bars[worstBarIdx].time,
+          position: 'aboveBar',
+          color: '#ef4444',
+          shape: 'arrowDown',
+          text: `Worst ${worst.pnl.toFixed(2)}`,
+        },
+      ]);
+      const stepText = `${best.pnl.toFixed(2)} / ${worst.pnl.toFixed(2)}`;
+      if (stepInfo) stepInfo.innerText = stepText;
+      if (expSteps) expSteps.innerText = `Step +/-: ${stepText}`;
+    }
+
+    function buildBars(points, bucket, baseHours) {
+      const timeline = buildBaseTimeline(points.length, baseHours);
+      const out = [];
+      for (let i = 0; i < points.length; i += bucket) {
+        const chunk = points.slice(i, i + bucket);
+        out.push({
+          time: timeline[i],
+          open: Number(chunk[0].equity),
+          close: Number(chunk[chunk.length - 1].equity),
+          high: Math.max(...chunk.map(p => Number(p.equity))),
+          low: Math.min(...chunk.map(p => Number(p.equity)))
+        });
+      }
+      return out;
+    }
+
+    function buildBaseTimeline(pointCount, baseHours) {
+      const bars = Math.max(1, pointCount - 1);
+      const stepSeconds = Math.max(1, Math.round(baseHours * 3600));
+      const end = Math.floor(Date.now() / 1000);
+      const start = end - bars * stepSeconds;
+      const out = [];
+      for (let i = 0; i < pointCount; i++) out.push(start + i * stepSeconds);
+      return out;
+    }
+
+    function aggregationBucketFromTimeframe(pointCount, aggValue, baseHours) {
+      if (aggValue === 'auto') return Math.max(1, Math.floor(pointCount / 120));
+      if (aggValue === 'raw') return 1;
+      const hours = parseAggregationHours(aggValue);
+      if (hours <= 0) return 1;
+      return Math.max(1, Math.round(hours / Math.max(1, baseHours)));
+    }
+
+    function parseAggregationHours(value) {
+      if (!value || typeof value !== 'string') return 0;
+      const trimmed = value.trim().toLowerCase();
+      if (!trimmed.endsWith('h')) return 0;
+      const parsed = Number(trimmed.slice(0, -1));
+      if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+      return parsed;
+    }
+
+    function buildDrawdownSeries(bars) {
+      const out = [];
+      if (!bars.length) return out;
+      let peak = bars[0].close;
+      bars.forEach((bar, idx) => {
+        if (bar.close > peak) peak = bar.close;
+        const dd = ((bar.close - peak) / Math.max(peak, 1e-9)) * 100;
+        out.push({ time: bar.time, value: dd });
+      });
+      return out;
+    }
+
+    function ensureCharts(style = document.getElementById('chart_style').value) {
+      if (!mainChart) {
+        mainChart = LightweightCharts.createChart(document.getElementById('main_chart'), chartOptions(340));
+        ddChart = LightweightCharts.createChart(document.getElementById('dd_chart'), chartOptions(120));
+        pnlChart = LightweightCharts.createChart(document.getElementById('pnl_chart'), chartOptions(120));
+        ddSeries = ddChart.addAreaSeries({
+          lineColor: '#f59e0b',
+          topColor: 'rgba(245, 158, 11, 0.35)',
+          bottomColor: 'rgba(245, 158, 11, 0.05)',
+          lineWidth: 2,
+        });
+        pnlSeries = pnlChart.addHistogramSeries({ priceFormat: { type: 'volume' } });
+        installResizeHandlers();
+      }
+      const desiredType = style === 'line' ? 'line' : 'candles';
+      if (!mainSeries || mainSeriesType !== desiredType) {
+        if (mainSeries) mainChart.removeSeries(mainSeries);
+        if (desiredType === 'line') {
+          mainSeries = mainChart.addLineSeries({ color: '#22c55e', lineWidth: 2 });
+        } else {
+          mainSeries = mainChart.addCandlestickSeries({
+            upColor: '#22c55e',
+            downColor: '#ef4444',
+            borderVisible: false,
+            wickUpColor: '#22c55e',
+            wickDownColor: '#ef4444',
+          });
+        }
+        mainSeriesType = desiredType;
+      }
+    }
+
+    function setMainSeriesData(style, bars) {
+      if (style === 'line') {
+        mainSeries.setData(bars.map(b => ({ time: b.time, value: b.close })));
+      } else {
+        mainSeries.setData(bars);
+      }
+      mainChart.timeScale().fitContent();
+      ddChart.timeScale().fitContent();
+      pnlChart.timeScale().fitContent();
+    }
+
+    function chartOptions(height) {
+      return {
+        layout: { background: { color: '#09111c' }, textColor: '#93a4bf' },
+        width: Math.max(400, document.getElementById('panel_charts').clientWidth - 36),
+        height,
+        grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } },
+        rightPriceScale: { borderColor: '#334155' },
+        timeScale: { borderColor: '#334155', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+      };
+    }
+
+    function installResizeHandlers() {
+      const targets = [
+        { el: document.getElementById('main_chart'), chart: mainChart },
+        { el: document.getElementById('dd_chart'), chart: ddChart },
+        { el: document.getElementById('pnl_chart'), chart: pnlChart },
+      ];
+      if (typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(() => {
+        targets.forEach(({ el, chart }) => {
+          chart.applyOptions({ width: Math.max(300, el.clientWidth) });
+        });
+      });
+      targets.forEach(({ el }) => observer.observe(el));
+    }
+
+    document.getElementById('search').addEventListener('change', loadMarkets);
+    document.getElementById('chart_style').addEventListener('change', () => renderTradingPanels(lastCurve));
+    document.getElementById('aggregation').addEventListener('change', () => renderTradingPanels(lastCurve));
+    loadMarkets().then(runBacktest);
+  </script>
+</body>
+</html>
+

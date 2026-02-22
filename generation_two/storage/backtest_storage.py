@@ -390,6 +390,158 @@ class BacktestStorage:
             logger.error(f"Error getting templates: {e}")
             return []
     
+    def get_unsimulated_templates(self, region: str = None, limit: int = None) -> List[Tuple[str, str]]:
+        """
+        Get templates that haven't been simulated yet (not in backtest_results)
+        
+        Args:
+            region: Optional region filter
+            limit: Optional limit on number of templates to return
+            
+        Returns:
+            List of (template, region) tuples for templates that haven't been simulated
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get templates that exist in generated_templates but not in backtest_results
+            query = '''
+                SELECT DISTINCT gt.template, gt.region
+                FROM generated_templates gt
+                LEFT JOIN backtest_results br ON gt.template = br.template AND gt.region = br.region
+                WHERE br.template IS NULL
+            '''
+            params = []
+            
+            if region:
+                query += ' AND gt.region = ?'
+                params.append(region)
+            
+            query += ' ORDER BY gt.created_at DESC'
+            
+            if limit:
+                query += ' LIMIT ?'
+                params.append(limit)
+            
+            cursor.execute(query, params)
+            templates = [(row[0], row[1]) for row in cursor.fetchall()]
+            conn.close()
+            
+            return templates
+            
+        except Exception as e:
+            logger.error(f"Error getting unsimulated templates: {e}")
+            return []
+    
+    def has_been_simulated(self, template: str, region: str) -> bool:
+        """
+        Check if a template has been simulated (exists in backtest_results)
+        
+        Args:
+            template: Template expression
+            region: Region code
+            
+        Returns:
+            True if template has been simulated, False otherwise
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT COUNT(*) FROM backtest_results
+                WHERE template = ? AND region = ?
+            ''', (template, region))
+            
+            count = cursor.fetchone()[0]
+            conn.close()
+            
+            return count > 0
+            
+        except Exception as e:
+            logger.error(f"Error checking if template has been simulated: {e}")
+            return False
+    
+    def get_recently_used_fields(self, region: str, limit: int = 50, lookback_hours: int = 24) -> List[str]:
+        """
+        Get recently used data fields for a region to avoid repetition
+        
+        Args:
+            region: Region code
+            limit: Maximum number of recent fields to return
+            lookback_hours: How many hours back to look (default: 24 hours)
+            
+        Returns:
+            List of field IDs that were recently used
+        """
+        try:
+            import time
+            import re
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            recently_used_fields = set()
+            
+            # From generated_templates (includes all generated templates)
+            cursor.execute('''
+                SELECT fields_used FROM generated_templates
+                WHERE region = ? AND created_at >= datetime('now', '-' || ? || ' hours')
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (region, lookback_hours, limit * 2))  # Get more to account for multiple fields per template
+            
+            for row in cursor.fetchall():
+                if row[0]:
+                    try:
+                        fields = json.loads(row[0])
+                        if isinstance(fields, list):
+                            recently_used_fields.update([f.lower() for f in fields if f])
+                    except:
+                        pass
+            
+            # From backtest_results (extract fields from templates)
+            cutoff_time = time.time() - (lookback_hours * 3600)
+            cursor.execute('''
+                SELECT template FROM backtest_results
+                WHERE region = ? AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (region, cutoff_time, limit * 2))
+            
+            # Extract field IDs from templates using regex
+            excluded = {
+                'ts_rank', 'ts_delta', 'ts_mean', 'ts_std', 'ts_sum', 'ts_min', 'ts_max',
+                'winsorize', 'zscore', 'rank', 'delta', 'correlation', 'add', 'subtract',
+                'multiply', 'divide', 'power', 'signed_power', 'abs', 'log', 'sqrt', 'inverse',
+                'min', 'max', 'sign', 'reverse', 'normalize', 'equal', 'not_equal', 'greater',
+                'less', 'greater_equal', 'less_equal', 'and', 'or', 'not', 'if', 'filter',
+                'subtract', 'divide', 'multiply', 'add', 'power', 'signed_power'
+            }
+            
+            for row in cursor.fetchall():
+                if row[0]:
+                    template = row[0]
+                    # Extract field IDs (long alphanumeric strings with underscores)
+                    field_pattern = r'\b([a-z][a-z0-9_]{10,})\b'
+                    matches = re.findall(field_pattern, template, re.IGNORECASE)
+                    for match in matches:
+                        match_lower = match.lower()
+                        if match_lower not in excluded and len(match) > 10:
+                            recently_used_fields.add(match_lower)
+            
+            conn.close()
+            
+            # Return as list, limited to requested number
+            result = list(recently_used_fields)[:limit]
+            logger.debug(f"Found {len(result)} recently used fields for {region} in last {lookback_hours} hours")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting recently used fields: {e}")
+            return []
+    
     def check_template_similarity(
         self, 
         new_template: str,

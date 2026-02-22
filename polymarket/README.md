@@ -1,0 +1,133 @@
+# Polymarket Research Engine
+
+`polymarket` is a purpose-built prediction-market research framework inspired by the modular architecture philosophy of QUANTAXIS:
+
+- clear separation of data, factors, simulation, risk, and execution
+- portable adapters for broker/market integrations
+- one pipeline that can support both research and production
+
+This is not a copy of QUANTAXIS. It is a new implementation focused on event-contract markets.
+
+## Project Structure
+
+```text
+polymarket/
+  polymarket_core/
+    adapters/       # External API adapters
+    alpha/          # Factor library
+    data/           # Data ingestion + normalization
+    engine/         # Simulation and evaluation
+    pipeline/       # Research workflows
+    portfolio/      # Risk and portfolio constraints
+  scripts/
+  tests/
+```
+
+## Quick Start
+
+```bash
+cd polymarket
+python -m venv .venv
+.venv\Scripts\python -m pip install -e . pytest
+python -m scripts.run_research
+python -m scripts.run_e2e
+python -m scripts.run_ai_agent --goal "Research top markets, run a backtest, and summarize"
+python -m scripts.run_full_cycle --mode paper --auto-execute
+python -m scripts.run_dashboard
+```
+
+`run_e2e` performs:
+- market data ingestion
+- factor scoring + risk sizing
+- paper execution
+- JSON artifact persistence to `polymarket/artifacts/`
+- HTML report persistence to `polymarket/artifacts/run_*.html` with traded markets and expected PnL
+
+Live mode (guarded) example:
+
+```bash
+python -m scripts.run_e2e --mode live --confirm-live --max-orders 2 --min-edge 0.08
+```
+
+## Ollama AI Agent
+
+The AI agent is an orchestration layer that can call internal tools for:
+- market research (`market_research`)
+- scenario backtesting (`backtest`)
+- end-to-end execution (`run_e2e`)
+- full-cycle orchestrator (`full_cycle`)
+
+Example:
+
+```bash
+python -m scripts.run_ai_agent --goal "Find top 3 opportunities and run backtest" --model qwen2.5-coder:1.5b
+```
+
+## Full-Cycle Runner
+
+`run_full_cycle` is a deterministic production stepper:
+1) research
+2) backtest risk gate
+3) execution (optional, if approved)
+4) cycle artifact persistence
+
+```bash
+python -m scripts.run_full_cycle --mode paper --auto-execute
+```
+
+Cycle runs also produce HTML reports (`cycle_*.html`) and, when executed, linked run HTML reports (`run_*.html`).
+
+## Interactive HTML GUI
+
+Launch:
+
+```bash
+python -m scripts.run_dashboard
+```
+
+Then open `http://127.0.0.1:5080` to:
+- fetch live markets (via current adapter)
+- filter by category and search text
+- choose exact markets for the test universe
+- configure backtest parameters (including timeframe days + bar interval)
+- run backtest and view TradingView-style PnL panels
+- inspect trade summary list (notional + model PnL)
+
+The dashboard backtest view is a **market replay mode** derived from Polymarket
+price-change fields (`oneHourPriceChange`, `oneWeekPriceChange`,
+`oneMonthPriceChange`, `oneYearPriceChange`) rather than random shock simulation.
+
+Mock data fallback is disabled in the research/backtest pipeline. Data source is
+real Polymarket market data via `gamma-api.polymarket.com`.
+
+## Credentials And Adapter Switching
+
+By default the pipeline uses a deterministic mock adapter for local development.
+When a Polymarket credential is present, the mock is skipped automatically and
+the HTTP adapter is used.
+
+You can provide credentials in either form:
+
+- environment variables:
+  - `POLYMARKET_API_KEY`
+  - `POLYMARKET_API_SECRET`
+  - `POLYMARKET_API_PASSPHRASE`
+  - `POLYMARKET_PRIVATE_KEY` (required for signed live orders)
+  - `POLYMARKET_FUNDER` (optional, for delegated funding setups)
+- file: `polymarket/credential.txt`
+  - plain token, or key-value format:
+
+```text
+POLYMARKET_API_KEY=...
+POLYMARKET_API_SECRET=...
+POLYMARKET_API_PASSPHRASE=...
+POLYMARKET_PRIVATE_KEY=...
+POLYMARKET_FUNDER=...
+```
+
+## Design Principles
+
+- **Composable**: components are swappable, testable, and independent
+- **Traceable**: each stage emits deterministic artifacts/records
+- **Practical**: starts minimal, then scales with connectors and strategies
+
