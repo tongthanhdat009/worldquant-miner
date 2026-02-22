@@ -129,11 +129,18 @@ class TemplateSimilarityChecker:
         - Operator overlap (30%)
         - Field overlap (20%)
         - Structural similarity (10%)
+        
+        Note: Placeholder normalization is applied to ensure OPERATOR1/OPERATOR2/OPERATOR3
+        permutations are treated as equivalent.
         """
-        string_sim = self.calculate_string_similarity(template1, template2)
-        operator_sim = self.calculate_operator_overlap(template1, template2)
-        field_sim = self.calculate_field_overlap(template1, template2)
-        structural_sim = self.calculate_structural_similarity(template1, template2)
+        # Normalize placeholders before comparison
+        normalized1 = self.normalize_placeholders(template1)
+        normalized2 = self.normalize_placeholders(template2)
+        
+        string_sim = self.calculate_string_similarity(normalized1, normalized2)
+        operator_sim = self.calculate_operator_overlap(normalized1, normalized2)
+        field_sim = self.calculate_field_overlap(normalized1, normalized2)
+        structural_sim = self.calculate_structural_similarity(normalized1, normalized2)
         
         # Weighted combination
         overall_sim = (
@@ -173,8 +180,69 @@ class TemplateSimilarityChecker:
         
         return similar
     
+    def normalize_placeholders(self, template: str) -> str:
+        """
+        Normalize placeholder numbers to canonical form based on occurrence order
+        
+        Example:
+        - OPERATOR3(OPERATOR2(OPERATOR1(DATA_FIELD1))) 
+        - OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1)))
+        Both become: OPERATOR_A(OPERATOR_B(OPERATOR_C(DATA_FIELD_A)))
+        
+        This ensures deduplication is not affected by placeholder number permutation.
+        The key is to replace by occurrence order (left to right), not by placeholder name.
+        """
+        normalized = template
+        
+        # Find all operator placeholder occurrences with their positions
+        operator_pattern = r'\bOPERATOR(\d+)\b'
+        operator_matches = []
+        for match in re.finditer(operator_pattern, normalized, re.IGNORECASE):
+            start, end = match.span()
+            placeholder = match.group(0).upper()  # OPERATOR1, OPERATOR2, etc.
+            operator_matches.append((start, end, placeholder))
+        
+        # Find all field placeholder occurrences with their positions
+        field_pattern = r'\bDATA_FIELD(\d+)\b'
+        field_matches = []
+        for match in re.finditer(field_pattern, normalized, re.IGNORECASE):
+            start, end = match.span()
+            placeholder = match.group(0).upper()  # DATA_FIELD1, DATA_FIELD2, etc.
+            field_matches.append((start, end, placeholder))
+        
+        # Sort by position (left to right) to get occurrence order
+        operator_matches.sort(key=lambda x: x[0])
+        field_matches.sort(key=lambda x: x[0])
+        
+        # Create replacement mapping: first occurrence -> _A, second -> _B, etc.
+        # But we need to replace from right to left to preserve positions
+        # So we'll build a list of replacements and apply them in reverse order
+        
+        operator_replacements = []
+        for idx, (start, end, original) in enumerate(operator_matches):
+            canonical = f"OPERATOR_{chr(65 + idx)}"  # A, B, C, D, ...
+            operator_replacements.append((start, end, original, canonical))
+        
+        field_replacements = []
+        for idx, (start, end, original) in enumerate(field_matches):
+            canonical = f"DATA_FIELD_{chr(65 + idx)}"  # A, B, C, D, ...
+            field_replacements.append((start, end, original, canonical))
+        
+        # Combine and sort by position (right to left for replacement)
+        all_replacements = operator_replacements + field_replacements
+        all_replacements.sort(key=lambda x: x[0], reverse=True)  # Right to left
+        
+        # Apply replacements from right to left to preserve positions
+        for start, end, original, canonical in all_replacements:
+            normalized = normalized[:start] + canonical + normalized[end:]
+        
+        return normalized
+    
     def get_template_hash(self, template: str) -> str:
         """Get hash of template for quick duplicate detection"""
-        # Normalize template (remove extra spaces, lowercase)
-        normalized = re.sub(r'\s+', ' ', template.strip().lower())
+        # Normalize placeholders first (OPERATOR1, OPERATOR2 -> OPERATOR_A, OPERATOR_B)
+        normalized = self.normalize_placeholders(template)
+        
+        # Then normalize template (remove extra spaces, lowercase)
+        normalized = re.sub(r'\s+', ' ', normalized.strip().lower())
         return hashlib.md5(normalized.encode()).hexdigest()

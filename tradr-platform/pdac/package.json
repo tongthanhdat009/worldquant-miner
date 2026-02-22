@@ -1,0 +1,37 @@
+{
+  "name": "@tradr/pdac",
+  "version": "1.0.0",
+  "description": "Product Design as Code - Spec-driven development language",
+  "main": "dist/index.js",
+  "bin": {
+    "pdac": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/cli.ts",
+    "test": "jest",
+    "compile": "tsc && node dist/cli.js compile"
+  },
+  "keywords": [
+    "pdac",
+    "spec",
+    "design",
+    "dsl",
+    "code-generation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.1.0",
+    "chalk": "^4.1.2",
+    "fs-extra": "^11.2.0",
+    "prettier": "^3.2.4"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "typescript-json-schema": "^0.62.0"
+  }
+}

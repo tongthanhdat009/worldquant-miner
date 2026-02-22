@@ -1,0 +1,148 @@
+// Match API Specification
+// Defines API contracts for match management
+
+api MatchAPI {
+  endpoint POST /matches {
+    request {
+      mode: GameMode
+      userId: string
+    }
+    response {
+      match: Match
+      status: "created" | "queued"
+    }
+    errors {
+      400: "Invalid game mode"
+      401: "Unauthorized"
+      500: "Internal server error"
+    }
+  }
+  
+  endpoint GET /matches/:id {
+    request {
+      id: string
+    }
+    response {
+      match: Match
+      players: Player[]
+      positions: Position[]
+      orders: Order[]
+    }
+    errors {
+      404: "Match not found"
+    }
+  }
+  
+  endpoint POST /matches/:id/start {
+    request {
+      id: string
+    }
+    response {
+      match: Match
+      market: MarketData
+    }
+    errors {
+      400: "Match cannot be started"
+      404: "Match not found"
+    }
+  }
+  
+  endpoint POST /matches/:id/end {
+    request {
+      id: string
+    }
+    response {
+      match: Match
+      rankings: Ranking[]
+      winner: Player | null
+    }
+    errors {
+      404: "Match not found"
+    }
+  }
+}
+
+model Match {
+  id: string
+  mode: GameMode
+  status: "waiting" | "running" | "finished" | "cancelled"
+  initialCapital: number
+  duration: number
+  startedAt: DateTime | null
+  endedAt: DateTime | null
+  marketSymbol: string | null
+  marketData: MarketData | null
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+model Player {
+  id: string
+  userId: string | null
+  isAi: boolean
+  aiDifficulty: "easy" | "medium" | "hard" | null
+  portfolioValue: number
+  cash: number
+  totalValue: number
+  trades: number
+  apm: number
+  accuracy: number
+  status: "active" | "eliminated" | "finished"
+  rank: number | null
+}
+
+model Position {
+  id: string
+  userId: string
+  matchId: string | null
+  symbol: string
+  side: "BUY" | "SELL"
+  quantity: number
+  entryPrice: number
+  currentPrice: number
+  unrealizedPnl: number
+  stopLoss: number | null
+  takeProfit: number | null
+  openedAt: DateTime
+  closedAt: DateTime | null
+}
+
+model Order {
+  id: string
+  userId: string
+  matchId: string | null
+  symbol: string
+  side: "BUY" | "SELL"
+  type: "MARKET" | "LIMIT" | "STOP"
+  quantity: number
+  price: number | null
+  status: "pending" | "filled" | "cancelled" | "rejected"
+  filledQuantity: number
+  averagePrice: number | null
+  createdAt: DateTime
+  filledAt: DateTime | null
+}
+
+model MarketData {
+  symbol: string
+  startPrice: number
+  currentPrice: number
+  ticks: MarketTick[]
+  duration: number
+}
+
+model MarketTick {
+  timestamp: DateTime
+  price: number
+  volume: number
+  bid: number
+  ask: number
+}
+
+model Ranking {
+  playerId: string
+  totalValue: number
+  rank: number
+}
+
+type GameMode = "pvp_1v1" | "pvp_battle_royale" | "pve_ai_challenge" | "pve_campaign" | "ranked_matchmaking"

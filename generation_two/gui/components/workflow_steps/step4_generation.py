@@ -341,8 +341,7 @@ class Step4Generation:
             used_operator_indices = set()  # Track which operator indices are currently in use OR have been used in this batch
             operator_usage_count = {}  # Track how many times each operator has been used (for diversity)
             max_operator_reuse = 3  # Maximum times an operator can be reused before being temporarily excluded
-            batch_used_operators = set()  # Track operator indices used in this entire batch (never release until batch complete)
-            batch_used_operator_names = set()  # Track operator NAMES used in this batch (for validation)
+            # No batch tracking needed - algorithmic generation uses placeholders
             
             def generate_template_in_slot(template_index: int, slot_ids: List[int], retry_count: int = 0):
                 """Generate a single template in assigned slot"""
@@ -395,7 +394,7 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             # First, filter out operators that are currently in use OR have been used in this batch
                             available_indices = [
                                 i for i in range(len(available_operators)) 
-                                if i not in used_operator_indices and i not in batch_used_operators
+                                if i not in used_operator_indices
                             ]
                             
                             # Then, prioritize operators with lower usage counts (for diversity)
@@ -415,12 +414,11 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 candidate_indices = available_indices
                             
                             if len(candidate_indices) < 2:
-                                # If still too few, reset everything (but keep batch_used_operators)
-                                logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Not enough available operators, resetting usage counts (batch-used: {len(batch_used_operators)})...")
+                                # If still too few, reset everything
+                                logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Not enough available operators, resetting usage counts...")
                                 used_operator_indices.clear()
                                 operator_usage_count.clear()
-                                # Don't clear batch_used_operators - those stay locked for entire batch
-                                candidate_indices = [i for i in range(len(available_operators)) if i not in batch_used_operators]
+                                candidate_indices = list(range(len(available_operators)))
                                 if len(candidate_indices) < 2:
                                     # If still not enough, we have to use batch-used operators (shouldn't happen with 79 operators)
                                     logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Very few operators available, allowing batch-used operators")
@@ -440,188 +438,115 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 # Not enough in least-used pool, sample from all candidates
                                 selected_operator_indices = random.sample(candidate_indices, num_operators)
                             
-                            # Mark selected operators as in use and add to batch-used set (never release until batch complete)
+                            # Mark selected operators as in use
                             used_operator_indices.update(selected_operator_indices)
-                            batch_used_operators.update(selected_operator_indices)  # Lock indices for entire batch
                             
-                            # Also track operator NAMES to validate Ollama doesn't use excluded operators
+                            # Track operator names for logging
                             operator_names = [available_operators[i].get('name', '?') for i in selected_operator_indices]
-                            batch_used_operator_names.update(operator_names)  # Lock operator names for entire batch
                             
                             for idx in selected_operator_indices:
                                 operator_usage_count[idx] = operator_usage_count.get(idx, 0) + 1
                             
                             usage_counts = [operator_usage_count.get(i, 0) for i in selected_operator_indices]
-                            logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Selected diverse operators: {operator_names} (usage: {usage_counts}, batch-used: {len(batch_used_operators)}/{len(available_operators)}, names: {len(batch_used_operator_names)})")
+                            logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Selected diverse operators: {operator_names} (usage: {usage_counts})")
                         
                         selected_operators_list = [available_operators[i] for i in selected_operator_indices if i < len(available_operators)]
                     
-                    # Generate template using Ollama with placeholder approach (NO progress callback - let it run silently)
-                    avoidance_context = self.workflow.generator.template_generator.duplicate_detector.get_avoidance_context(limit=10)
-                    template = self.workflow.generator.template_generator.ollama_manager.generate_template(
-                        prompt,
-                        region=region,
-                        avoid_duplicates_context=avoidance_context,
-                        available_operators=selected_operators_list,
-                        available_fields=selected_fields,  # Pass selected fields for placeholder mapping
-                        successful_patterns=successful_patterns,
-                        progress_callback=None,  # Disabled to prevent GUI freeze with concurrent requests
-                        use_placeholder_fields=True  # Enable V2 placeholder approach
-                    )
+                    # Generate template algorithmically (NO Ollama calls in Step 4)
+                    if self.gen_slot_manager:
+                        slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
+                        slot.update_progress(30.0, "Generating algorithmically...", "")
+                        slot.add_log("🔄 Generating placeholder expression...")
                     
-                    # IMMEDIATELY update status when Ollama completes (before validation)
-                    if template:
-                        if self.gen_slot_manager:
-                            slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                            slot.update_progress(50.0, "✅ Ollama completed", "")
-                            slot.add_log("✅ Ollama response received")
-                            # Force immediate GUI update to show Ollama completion
-                            self.workflow.frame.after_idle(lambda sid=primary_slot_id: self._update_gen_slot_display_direct(
-                                sid,
-                                slot.status.value.upper(),
-                                slot.template[:40] + "..." if slot.template else "",
-                                f"Region: {slot.region}" if slot.region else "",
-                                slot.get_logs()[-5:],
-                                slot.progress_percent,
-                                slot.progress_message
-                            ))
+                    from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+                    import random
                     
-                    if not template:
-                        # Try fallback
-                        if self.gen_slot_manager:
-                            slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                            slot.update_progress(40.0, "Trying fallback...", "")
-                            slot.add_log("❌ Ollama failed, trying fallback...")
-                        template = self.workflow.generator.template_generator.generate_template_from_prompt(prompt, region=region, use_ollama=True)
+                    generator = AlgorithmicTemplateGenerator(selected_operators_list, selected_fields)
+                    
+                    # Try to generate unique template (check duplicates)
+                    max_duplicate_retries = 10
+                    template = None
+                    for attempt in range(max_duplicate_retries):
+                        # Choose generation method randomly
+                        methods = ["random_walk", "brownian", "tree", "linear"]
+                        method = random.choice(methods)
+                        
+                        placeholder_expr = generator.generate_placeholder_expression(
+                            max_operators=5,
+                            method=method
+                        )
+                        
+                        # Check for duplicates in database
+                        if hasattr(self.workflow.generator, 'backtest_storage') and self.workflow.generator.backtest_storage:
+                            from generation_two.core import template_similarity
+                            similarity_checker = template_similarity.TemplateSimilarityChecker()
+                            template_hash = similarity_checker.get_template_hash(placeholder_expr)
+                            
+                            # Check if this template exists
+                            existing_templates = self.workflow.generator.backtest_storage.get_all_templates(region=region, limit=1000)
+                            is_duplicate = False
+                            
+                            for existing_template in existing_templates:
+                                existing_hash = similarity_checker.get_template_hash(existing_template)
+                                if existing_hash == template_hash:
+                                    is_duplicate = True
+                                    logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Duplicate template detected, retrying...")
+                                    break
+                            
+                            if not is_duplicate:
+                                template = placeholder_expr
+                                break
+                        else:
+                            # No database, just use the generated template
+                            template = placeholder_expr
+                            break
                     
                     if not template:
                         completed_count['failed'] += 1
-                        self.gen_slot_manager.release_slots(slot_ids, success=False, error="Generation failed")
-                        self._update_gen_slot_display(primary_slot_id, "FAILED", "Generation failed", f"❌ Failed", ["❌ Generation failed"], 100.0, "")
-                        self._log_to_gen_slot(primary_slot_id, "❌ Generation failed")
+                        self.gen_slot_manager.release_slots(slot_ids, success=False, error="Could not generate unique template")
+                        self._update_gen_slot_display(primary_slot_id, "FAILED", "Duplicate check failed", f"❌ Failed", ["❌ Could not generate unique template"], 100.0, "")
+                        self._log_to_gen_slot(primary_slot_id, "❌ Could not generate unique template after retries")
                         return
                     
+                    # Update status
+                    if self.gen_slot_manager:
+                        slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
+                        slot.update_progress(50.0, "✅ Generated", "")
+                        slot.add_log(f"✅ Generated: {template[:50]}...")
+                    
+                    # Template is already generated algorithmically with placeholders
                     # Clean template - preserve commas for operator parameters!
-                    template = template.replace('`', '').strip()
-                    # Remove natural language prefixes if present
                     import re
-                    natural_language_patterns = [
-                        r'^let\'?s\s+.*?',
-                        r'^we\'?ll\s+.*?',
-                        r'^we\s+will\s+.*?',
-                        r'^generate\s+a\s+.*?',
-                        r'^create\s+a\s+.*?',
-                        r'^build\s+a\s+.*?',
-                        r'^focus\s+on\s+.*?',
-                        r'^using\s+maximum\s+.*?',
-                    ]
-                    for pattern in natural_language_patterns:
-                        template = re.sub(pattern, '', template, flags=re.IGNORECASE).strip()
-                    # Extract only the expression part (first line with parentheses)
-                    if '(' in template and ')' in template:
-                        lines = template.split('\n')
-                        for line in lines:
-                            if '(' in line and ')' in line:
-                                template = line.strip()
-                                break
+                    template = template.replace('`', '').strip()
                     # Fix missing commas: ) number -> ), number
                     template = re.sub(r'\)\s+(\d)', r'), \1', template)
                     
-                    # V2 Approach: Replace field placeholders with actual field IDs
-                    if template and selected_fields and 'DATA_FIELD' in template.upper():
-                        template = self.workflow.generator.template_generator._replace_field_placeholders(
-                            template, selected_fields, region
+                    # Store template with placeholders for display in Step 4
+                    template_with_placeholders = template
+                    
+                    # For validation, we need to replace placeholders temporarily
+                    # But we'll store the template WITH placeholders for display
+                    template_for_validation = template
+                    if template and selected_operators_list and 'OPERATOR' in template.upper():
+                        template_for_validation = self.workflow.generator.template_generator._replace_operator_placeholders(
+                            template, selected_operators_list
+                        )
+                    if template_for_validation and selected_fields and 'DATA_FIELD' in template_for_validation.upper():
+                        template_for_validation = self.workflow.generator.template_generator._replace_field_placeholders(
+                            template_for_validation, selected_fields, region
                         )
                     
-                    # Validate that template doesn't use operators that are locked in batch_used_operator_names
-                    # This ensures Ollama didn't ignore our operator selection
-                    # Get operator_names from selected_operators_list if not already defined
-                    if 'operator_names' not in locals() and 'selected_operators_list' in locals():
-                        operator_names = [op.get('name', '?') for op in selected_operators_list]
+                    # Use template_for_validation for all validation checks
+                    template = template_for_validation
                     
-                    forbidden_operators = []
-                    if 'batch_used_operator_names' in locals():
-                        template_operators = self._extract_operators_from_template(template, available_operators)
-                        # Check ALL operators in template - if ANY operator is in batch_used_operator_names 
-                        # (already used by another slot), it's forbidden, EVEN if it's in current slot's operator_names
-                        # This ensures true exclusivity: once an operator is used by one slot, no other slot can use it
-                        if 'operator_names' in locals():
-                            # Only allow operators that are in current slot's operator_names AND not in batch_used_operator_names
-                            forbidden_operators = [op for op in template_operators 
-                                                 if op in batch_used_operator_names and op not in operator_names]
-                            # Also check: if operator is in operator_names but ALSO in batch_used_operator_names,
-                            # it means another slot already used it, so it's forbidden
-                            already_used_in_batch = [op for op in template_operators 
-                                                   if op in batch_used_operator_names and op in operator_names]
-                            if already_used_in_batch:
-                                logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Template uses operators {already_used_in_batch} that were already used by other slots in this batch (even though they're in selected list)")
-                                forbidden_operators.extend(already_used_in_batch)
-                        else:
-                            # If no operator_names, any operator in batch_used_operator_names is forbidden
-                            forbidden_operators = [op for op in template_operators if op in batch_used_operator_names]
-                    
-                    if forbidden_operators:
-                        logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Template {template_index+1} uses forbidden operators {forbidden_operators} (already used in batch)")
-                        self._log_to_gen_slot(primary_slot_id, f"⚠️ Template uses forbidden operators {forbidden_operators}, attempting mechanical replacement...")
-                        
-                        # Try mechanical replacement first (before retrying)
-                        if 'operator_names' in locals() and operator_names:
-                            replaced_template = self._replace_forbidden_operators(template, forbidden_operators, operator_names, available_operators)
-                            if replaced_template != template:
-                                template = replaced_template
-                                logger.info(f"[Step 4] Slot {primary_slot_id+1}: Mechanically replaced forbidden operators: {forbidden_operators}")
-                                self._log_to_gen_slot(primary_slot_id, f"✅ Replaced forbidden operators with available ones")
-                                # Continue with the replaced template instead of retrying
-                            else:
-                                # Replacement failed, retry generation
-                                logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Could not replace forbidden operators, retrying...")
-                                self._log_to_gen_slot(primary_slot_id, f"⚠️ Could not replace, retrying...")
-                                # Release operators back to pool
-                                with operator_pool_lock:
-                                    used_operator_indices.difference_update(selected_operator_indices)
-                                    batch_used_operators.difference_update(selected_operator_indices)
-                                    batch_used_operator_names.difference_update(operator_names)
-                                # Retry with new operator selection
-                                max_retries = 3
-                                if retry_count < max_retries:
-                                    return generate_template_in_slot(template_index, slot_ids, retry_count + 1)
-                                else:
-                                    logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Max retries reached for forbidden operators")
-                                    completed_count['failed'] += 1
-                                    self.gen_slot_manager.release_slots(slot_ids, success=False, error=f"Forbidden operators: {forbidden_operators}")
-                                    self._update_gen_slot_display(primary_slot_id, "FAILED", "Forbidden operators", f"❌ {forbidden_operators}", [f"❌ Forbidden operators"], 100.0, "")
-                                    return
-                        else:
-                            # No operator_names available, just retry
-                            logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Template {template_index+1} uses forbidden operators {forbidden_operators}, retrying...")
-                            self._log_to_gen_slot(primary_slot_id, f"⚠️ Template uses forbidden operators {forbidden_operators}, retrying...")
-                            # Release operators back to pool
-                            with operator_pool_lock:
-                                used_operator_indices.difference_update(selected_operator_indices)
-                                batch_used_operators.difference_update(selected_operator_indices)
-                                if 'operator_names' in locals():
-                                    batch_used_operator_names.difference_update(operator_names)
-                            # Retry with new operator selection
-                            max_retries = 3
-                            if retry_count < max_retries:
-                                return generate_template_in_slot(template_index, slot_ids, retry_count + 1)
-                            else:
-                                logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Max retries reached for forbidden operators")
-                                completed_count['failed'] += 1
-                                self.gen_slot_manager.release_slots(slot_ids, success=False, error=f"Forbidden operators: {forbidden_operators}")
-                                self._update_gen_slot_display(primary_slot_id, "FAILED", "Forbidden operators", f"❌ {forbidden_operators}", [f"❌ Forbidden operators"], 100.0, "")
-                                return
+                    # No forbidden operators check - algorithmic generation uses placeholders, so no operator reuse issues
                     
                     # Validate operator count (max 5 operators) - retry if too many
                     operator_count = self._count_operators_in_template(template, available_operators)
                     if operator_count > 5:
-                        # Release operators from "in use" set (but keep in batch_used_operators)
+                        # Release operators from "in use" set
                         with operator_pool_lock:
                             used_operator_indices.difference_update(selected_operator_indices)
-                            # Also remove from batch_used_operators since this attempt failed
-                            batch_used_operators.difference_update(selected_operator_indices)
-                            if 'operator_names' in locals():
-                                batch_used_operator_names.difference_update(operator_names)
                             # Decrement usage count since this attempt failed
                             for idx in selected_operator_indices:
                                 if idx in operator_usage_count:
@@ -663,13 +588,9 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 # Deduplication didn't fully fix it, retry generation
                                 logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Deduplication didn't fully fix duplicates: {duplicate_info_after}, retrying...")
                                 self._log_to_gen_slot(primary_slot_id, f"⚠️ Deduplication incomplete, retrying...")
-                                # Release operators from "in use" set (but keep in batch_used_operators)
+                                # Release operators from "in use" set
                                 with operator_pool_lock:
                                     used_operator_indices.difference_update(selected_operator_indices)
-                                    # Also remove from batch_used_operators since this attempt failed
-                                    batch_used_operators.difference_update(selected_operator_indices)
-                                    if 'operator_names' in locals():
-                                        batch_used_operator_names.difference_update(operator_names)
                                     # Decrement usage count since this attempt failed
                                     for idx in selected_operator_indices:
                                         if idx in operator_usage_count:
@@ -688,13 +609,9 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             # Deduplication didn't change anything, retry generation
                             logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Could not deduplicate, retrying...")
                             self._log_to_gen_slot(primary_slot_id, f"⚠️ Could not deduplicate, retrying...")
-                            # Release operators from "in use" set (but keep in batch_used_operators)
+                            # Release operators from "in use" set
                             with operator_pool_lock:
                                 used_operator_indices.difference_update(selected_operator_indices)
-                                # Also remove from batch_used_operators since this attempt failed
-                                batch_used_operators.difference_update(selected_operator_indices)
-                                if 'operator_names' in locals():
-                                    batch_used_operator_names.difference_update(operator_names)
                                 # Decrement usage count since this attempt failed
                                 for idx in selected_operator_indices:
                                     if idx in operator_usage_count:
@@ -710,316 +627,57 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 self._update_gen_slot_display(primary_slot_id, "FAILED", "Duplicate operators", f"❌ {duplicate_info}", [f"❌ Consecutive duplicates: {duplicate_info}"], 100.0, "")
                                 return
                     
-                    # Update progress (batch updates)
+                    # Update progress
                     if self.gen_slot_manager:
                         slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                        slot.update_progress(60.0, "Testing in WorldQuant...", "")
+                        slot.update_progress(80.0, "✅ Generated", "")
                         slot.add_log(f"Generated: {template[:50]}...")
                     self._log_to_gen_slot(primary_slot_id, f"Generated: {template[:50]}...")
                     # Only log important events (successful generation)
                     if (template_index + 1) % 3 == 0:  # Log every 3rd successful generation
                         logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Template {template_index+1} generated")
                     
-                    # V2 APPROACH: Test in WorldQuant FIRST (the real verification), then fix locally if needed
-                    logger.info(f"[Step 4] Slot {primary_slot_id+1}: ⚡ Testing template {template_index+1} in WorldQuant FIRST (real verification)...")
-                    if self.gen_slot_manager:
-                        slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                        slot.update_progress(90.0, "Testing in WorldQuant...", "")
-                    self._log_to_gen_slot(primary_slot_id, "Testing compilation in WorldQuant...")
-                    logger.info(f"[Step 4] Slot {primary_slot_id+1}: Testing template {template_index+1} in WorldQuant...")
+                    # No WorldQuant testing in Step 4 - templates are generated with placeholders
+                    # WorldQuant validation will happen in Step 5 during simulation
                     
-                    worldquant_valid = False
-                    worldquant_error = None
-                    
-                    # Try to submit to WorldQuant API to verify it compiles
-                    # Access session via template_generator (same as step5)
-                    try:
-                        logger.info(f"[Step 4] Slot {primary_slot_id+1}: Checking for session...")
-                        sess = None
-                        if hasattr(self.workflow.generator, 'template_generator'):
-                            logger.info(f"[Step 4] Slot {primary_slot_id+1}: template_generator exists")
-                            if hasattr(self.workflow.generator.template_generator, 'sess'):
-                                sess = self.workflow.generator.template_generator.sess
-                                logger.info(f"[Step 4] Slot {primary_slot_id+1}: Session found: {sess is not None}")
-                            else:
-                                logger.warning(f"[Step 4] Slot {primary_slot_id+1}: template_generator has no 'sess' attribute")
-                        else:
-                            logger.warning(f"[Step 4] Slot {primary_slot_id+1}: generator has no 'template_generator' attribute")
-                        
-                        if sess:
-                            logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Session available, proceeding with WorldQuant test")
-                            # Get region config for universe (create similar to step5)
-                            from generation_two.core.region_config import REGION_DEFAULT_UNIVERSE
-                            universe = REGION_DEFAULT_UNIVERSE.get(region, "TOP3000")
-                            
-                            logger.info(f"[Step 4] Slot {primary_slot_id+1}: Submitting to WorldQuant API (region={region}, universe={universe})...")
-                            
-                            # Get proper neutralization for region (SUBUNIVERSE is not valid!)
-                            from generation_two.core.region_config import get_default_neutralization
-                            neutralization = get_default_neutralization(region)  # Usually 'INDUSTRY'
-                            
-                            # Submit to /simulations endpoint to test compilation (quick test, no full simulation)
-                            # Use same format as simulator_tester (v2 approach)
-                            simulation_data = {
-                                'type': 'REGULAR',
-                                'settings': {
-                                    'region': region,
-                                    'universe': universe,
-                                    'instrumentType': 'EQUITY',  # Required field
-                                    'delay': 1,  # Use delay=1 for testing
-                                    'decay': 0,
-                                    'neutralization': neutralization,  # Use region-specific default (INDUSTRY)
-                                    'truncation': 0.08,
-                                    'pasteurization': 'ON',
-                                    'unitHandling': 'VERIFY',
-                                    'nanHandling': 'OFF',
-                                    'maxTrade': 'OFF',
-                                    'language': 'FASTEXPR',
-                                    'visualization': False,
-                                    'startDate': '2013-01-20',  # v2 format
-                                    'endDate': '2023-01-20',  # v2 format
-                                    'testPeriod': 'P1Y0M0D'  # 1 year for quick test
-                                },
-                                'regular': template
-                            }
-                            
-                            test_response = sess.post(
-                                'https://api.worldquantbrain.com/simulations',
-                                json=simulation_data,
-                                timeout=10  # Quick timeout for compilation test
-                            )
-                            
-                            logger.info(f"[Step 4] Slot {primary_slot_id+1}: WorldQuant API response: {test_response.status_code}")
-                            if test_response.status_code != 201:
-                                logger.error(f"[Step 4] Slot {primary_slot_id+1}: WorldQuant API error response: {test_response.text}")
-                                logger.error(f"[Step 4] Slot {primary_slot_id+1}: Request data: {simulation_data}")
-                            
-                            if test_response.status_code == 201:
-                                # Compilation successful in WorldQuant!
-                                worldquant_valid = True
-                                progress_url = test_response.headers.get('Location')
-                                if progress_url:
-                                    # Extract simulation ID from progress URL if needed for cleanup
-                                    # Format: /simulations/{simulation_id}/progress
-                                    try:
-                                        sim_id = progress_url.split('/simulations/')[1].split('/')[0] if '/simulations/' in progress_url else None
-                                        if sim_id:
-                                            # Optionally cancel/delete the test simulation to avoid clutter
-                                            try:
-                                                sess.delete(
-                                                    f'https://api.worldquantbrain.com/simulations/{sim_id}',
-                                                    timeout=5
-                                                )
-                                            except:
-                                                pass  # Ignore deletion errors
-                                    except:
-                                        pass
-                                self._log_to_gen_slot(primary_slot_id, "✅ WorldQuant compilation successful")
-                                logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ WorldQuant compilation verified for template {template_index+1}")
-                            else:
-                                # Compilation failed - get error message
-                                worldquant_error = test_response.text
-                                try:
-                                    error_json = test_response.json()
-                                    worldquant_error = error_json.get('message', worldquant_error)
-                                except:
-                                    pass
-                                
-                                self._log_to_gen_slot(primary_slot_id, f"❌ WorldQuant error: {worldquant_error[:50]}...")
-                                logger.warning(f"[Step 4] Slot {primary_slot_id+1}: WorldQuant compilation failed: {worldquant_error[:100]}")
-                                
-                                # Feed error back to template_validator to improve it (v2 approach)
-                                if self.workflow.generator.template_generator.template_validator:
-                                    # Use learn_from_simulation_error which stores to compiler knowledge and AST patterns
-                                    self.workflow.generator.template_generator.template_validator.learn_from_simulation_error(
-                                        template, worldquant_error
-                                    )
-                                    logger.info(f"[Step 4] Slot {primary_slot_id+1}: Fed WorldQuant error to compiler for learning")
-                        else:
-                            logger.error(f"[Step 4] Slot {primary_slot_id+1}: ❌ No session available for WorldQuant test!")
-                            logger.error(f"[Step 4] Slot {primary_slot_id+1}: generator={self.workflow.generator}")
-                            logger.error(f"[Step 4] Slot {primary_slot_id+1}: has template_generator={hasattr(self.workflow.generator, 'template_generator')}")
-                            if hasattr(self.workflow.generator, 'template_generator'):
-                                logger.error(f"[Step 4] Slot {primary_slot_id+1}: template_generator={self.workflow.generator.template_generator}")
-                                logger.error(f"[Step 4] Slot {primary_slot_id+1}: has sess={hasattr(self.workflow.generator.template_generator, 'sess')}")
-                            worldquant_valid = True  # Assume valid if we can't test
-                            self._log_to_gen_slot(primary_slot_id, "⚠️ WorldQuant test skipped (no session)")
-                    except Exception as wq_error:
-                        # API call failed (network, timeout, etc.) - don't fail the template
-                        logger.error(f"[Step 4] Slot {primary_slot_id+1}: ❌ WorldQuant test EXCEPTION: {type(wq_error).__name__}: {wq_error}", exc_info=True)
-                        worldquant_valid = True  # Assume valid if we can't test
-                        self._log_to_gen_slot(primary_slot_id, f"⚠️ WorldQuant test skipped: {str(wq_error)[:30]}")
-                    
-                    # If WorldQuant test failed, try to fix the template using local validation/compilation
-                    if not worldquant_valid and worldquant_error:
-                        logger.info(f"[Step 4] Slot {primary_slot_id+1}: WorldQuant failed, trying to fix using local validation...")
-                        if self.gen_slot_manager:
-                            slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                            slot.update_progress(85.0, "Fixing with local validation...", "")
-                        
-                        # Try to fix using the WorldQuant error (this is where local validation helps)
-                        if self.workflow.generator.template_generator.template_validator:
-                            # First try compilation-based fixing
-                            compile_result = self.workflow.generator.template_generator.template_validator.compile_template(template, optimize=False)
-                            if compile_result.success:
-                                if compile_result.final_expression and compile_result.final_expression != template:
-                                    template = compile_result.final_expression
-                                    logger.info(f"[Step 4] Slot {primary_slot_id+1}: Compiler fixed template, retesting in WorldQuant...")
-                                    # Retest in WorldQuant with fixed template
-                                    if sess:
-                                        try:
-                                            # Get proper neutralization for region
-                                            from generation_two.core.region_config import get_default_neutralization
-                                            neutralization = get_default_neutralization(region)
-                                            
-                                            retest_data = {
-                                                'type': 'REGULAR',
-                                                'settings': {
-                                                    'region': region,
-                                                    'universe': universe,
-                                                    'instrumentType': 'EQUITY',
-                                                    'delay': 1,
-                                                    'decay': 0,
-                                                    'neutralization': neutralization,  # Use region-specific default
-                                                    'truncation': 0.08,
-                                                    'pasteurization': 'ON',
-                                                    'unitHandling': 'VERIFY',
-                                                    'nanHandling': 'OFF',
-                                                    'maxTrade': 'OFF',
-                                                    'language': 'FASTEXPR',
-                                                    'visualization': False,
-                                                    'startDate': '2013-01-20',
-                                                    'endDate': '2023-01-20',
-                                                    'testPeriod': 'P1Y0M0D'
-                                                },
-                                                'regular': template
-                                            }
-                                            retest_response = sess.post(
-                                                'https://api.worldquantbrain.com/simulations',
-                                                json=retest_data,
-                                                timeout=10
-                                            )
-                                            if retest_response.status_code == 201:
-                                                worldquant_valid = True
-                                                progress_url = retest_response.headers.get('Location')
-                                                if progress_url:
-                                                    try:
-                                                        sim_id = progress_url.split('/simulations/')[1].split('/')[0] if '/simulations/' in progress_url else None
-                                                        if sim_id:
-                                                            try:
-                                                                sess.delete(f'https://api.worldquantbrain.com/simulations/{sim_id}', timeout=5)
-                                                            except:
-                                                                pass
-                                                    except:
-                                                        pass
-                                                logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Fixed template passed WorldQuant!")
-                                            else:
-                                                worldquant_error = retest_response.text
-                                                try:
-                                                    error_json = retest_response.json()
-                                                    worldquant_error = error_json.get('message', worldquant_error)
-                                                except:
-                                                    pass
-                                        except Exception:
-                                            pass  # If retest fails, continue with original error
-                            
-                            # If still not valid, try traditional validation fixing
-                            if not worldquant_valid:
-                                fixed_template, fixes = self.workflow.generator.template_generator.template_validator.fix_template(
-                                    template, worldquant_error, region
-                                )
-                                if fixed_template and fixed_template != template:
-                                    template = fixed_template
-                                    self._log_to_gen_slot(primary_slot_id, f"✅ Fixed using WorldQuant error ({len(fixes)} fixes)")
-                                    logger.info(f"[Step 4] Slot {primary_slot_id+1}: Fixed template {template_index+1} using WorldQuant error, retesting...")
-                                    # Retest in WorldQuant with fixed template
-                                    if sess:
-                                        try:
-                                            # Get proper neutralization for region
-                                            from generation_two.core.region_config import get_default_neutralization
-                                            neutralization = get_default_neutralization(region)
-                                            
-                                            retest_data = {
-                                                'type': 'REGULAR',
-                                                'settings': {
-                                                    'region': region,
-                                                    'universe': universe,
-                                                    'instrumentType': 'EQUITY',
-                                                    'delay': 1,
-                                                    'decay': 0,
-                                                    'neutralization': neutralization,  # Use region-specific default
-                                                    'truncation': 0.08,
-                                                    'pasteurization': 'ON',
-                                                    'unitHandling': 'VERIFY',
-                                                    'nanHandling': 'OFF',
-                                                    'maxTrade': 'OFF',
-                                                    'language': 'FASTEXPR',
-                                                    'visualization': False,
-                                                    'startDate': '2013-01-20',
-                                                    'endDate': '2023-01-20',
-                                                    'testPeriod': 'P1Y0M0D'
-                                                },
-                                                'regular': template
-                                            }
-                                            retest_response = sess.post(
-                                                'https://api.worldquantbrain.com/simulations',
-                                                json=retest_data,
-                                                timeout=10
-                                            )
-                                            if retest_response.status_code == 201:
-                                                worldquant_valid = True
-                                                progress_url = retest_response.headers.get('Location')
-                                                if progress_url:
-                                                    try:
-                                                        sim_id = progress_url.split('/simulations/')[1].split('/')[0] if '/simulations/' in progress_url else None
-                                                        if sim_id:
-                                                            try:
-                                                                sess.delete(f'https://api.worldquantbrain.com/simulations/{sim_id}', timeout=5)
-                                                            except:
-                                                                pass
-                                                    except:
-                                                        pass
-                                                logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Fixed template passed WorldQuant!")
-                                            else:
-                                                worldquant_error = retest_response.text
-                                                try:
-                                                    error_json = retest_response.json()
-                                                    worldquant_error = error_json.get('message', worldquant_error)
-                                                except:
-                                                    pass
-                                        except Exception:
-                                            pass
-                                else:
-                                    # Couldn't fix - mark as failed
-                                    completed_count['failed'] += 1
-                                    self.gen_slot_manager.release_slots(slot_ids, success=False, error=worldquant_error)
-                                    self._update_gen_slot_display(primary_slot_id, "FAILED", template[:40] + "...", f"❌ WQ Error", [f"❌ {worldquant_error[:50]}"], 100.0, "")
-                                    self._log_to_gen_slot(primary_slot_id, f"❌ WorldQuant validation failed: {worldquant_error[:50]}")
-                                    logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Could not fix template {template_index+1} after WorldQuant error")
-                                    return
-                    
-                    # Success! Release operators from "in use" set (but keep in batch_used_operators until batch complete)
-                    # IMPORTANT: Also add the ACTUAL operators used in the template to batch_used_operator_names
-                    # This ensures that even if Ollama used different operators than selected, they're still tracked
+                    # Success! Release operators from "in use" set
+                    # No need to track batch_used_operator_names since we're using placeholders
                     if 'selected_operator_indices' in locals():
                         with operator_pool_lock:
                             used_operator_indices.difference_update(selected_operator_indices)
-                            # DO NOT remove from batch_used_operators - keep locked for entire batch
-                            
-                            # Extract ACTUAL operators used in the final template and add them to batch_used_operator_names
-                            # This catches cases where Ollama used operators not in selected_operators_list
-                            actual_template_operators = self._extract_operators_from_template(template, available_operators)
-                            if actual_template_operators:
-                                batch_used_operator_names.update(actual_template_operators)
-                                logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Added actual template operators {actual_template_operators} to batch_used_operator_names (total: {len(batch_used_operator_names)})")
-                            
-                            logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Released operators {selected_operator_indices} from active use (still locked for batch)")
+                            logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Released operators {selected_operator_indices} from active use")
                     
                     completed_count['successful'] += 1
-                    generated_templates.append({'template': template, 'region': region})
+                    # Store template WITH placeholders for display in Step 4
+                    # Placeholders will be replaced in Step 5 before simulation
+                    generated_templates.append({'template': template_with_placeholders, 'region': region})
+                    
+                    # Store template with placeholders in database
+                    if hasattr(self.workflow.generator, 'backtest_storage') and self.workflow.generator.backtest_storage:
+                        try:
+                            from generation_two.core import template_similarity
+                            similarity_checker = template_similarity.TemplateSimilarityChecker()
+                            operators_used = list(similarity_checker.extract_operators(template_with_placeholders))
+                            fields_used = list(similarity_checker.extract_fields(template_with_placeholders))
+                            
+                            self.workflow.generator.backtest_storage.store_template(
+                                template=template_with_placeholders,
+                                region=region,
+                                operators_used=operators_used,
+                                fields_used=fields_used
+                            )
+                            logger.debug(f"[Step 4] Stored template with placeholders in database: {template_with_placeholders[:50]}...")
+                        except Exception as e:
+                            logger.warning(f"[Step 4] Failed to store template in database: {e}")
                     self.gen_slot_manager.release_slots(slot_ids, success=True, result={'template': template})
-                    self._update_gen_slot_display(primary_slot_id, "COMPLETED", template[:40] + "...", f"✅ Valid", ["✅ Generated", "✅ Validated", "✅ WorldQuant OK"], 100.0, "")
-                    self._log_to_gen_slot(primary_slot_id, f"✅ SUCCESS: {template[:50]}...")
+                    # Update slot display with consistent status
+                    stored_msg = "✅ Stored" if hasattr(self.workflow.generator, 'backtest_storage') and self.workflow.generator.backtest_storage else ""
+                    status_messages = ["✅ Generated"]
+                    if stored_msg:
+                        status_messages.append(stored_msg)
+                    
+                    self._update_gen_slot_display(primary_slot_id, "COMPLETED", template_with_placeholders[:40] + "...", f"✅ Generated", status_messages, 100.0, "")
+                    self._log_to_gen_slot(primary_slot_id, f"✅ Generated: {template_with_placeholders[:50]}...")
                     # Only log every 3rd successful template to reduce spew
                     if (template_index + 1) % 3 == 0:
                         logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Template {template_index+1} completed")
@@ -1118,9 +776,8 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     self.generation_running = False
                     # Clear batch-used operators when batch completes
                     with operator_pool_lock:
-                        batch_used_operators.clear()
-                        batch_used_operator_names.clear()
-                        logger.debug(f"[Step 4] Batch complete: Cleared batch_used_operators and batch_used_operator_names")
+                        # Batch complete - no cleanup needed since we don't track batch operators
+                        logger.debug(f"[Step 4] Batch complete")
                     # Batch final state updates
                     def cleanup_updates():
                         self.generate_button.config(state=tk.NORMAL)
@@ -1303,6 +960,16 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
         """Update generation slot progress bar and message directly (no frame.after nesting) - OPTIMIZED for performance"""
         if slot_id not in self.gen_slot_widgets:
             return
+        
+        # Ensure percent is a float (handle string inputs from API)
+        try:
+            percent = float(percent)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid percent value: {percent}, using 0.0")
+            percent = 0.0
+        
+        # Clamp percent to valid range [0, 100]
+        percent = max(0.0, min(100.0, percent))
         
         # Cache last progress to avoid unnecessary updates
         if not hasattr(self, '_last_progress'):

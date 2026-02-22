@@ -1,0 +1,171 @@
+// User Flow Specification
+// Defines user journeys through the platform
+
+flow CreateAndStartMatch {
+  step "Select Game Mode" {
+    component: MatchLobby
+    state: {
+      selectedMode: GameMode | null
+      isCreating: boolean = false
+    }
+    actions: {
+      selectMode: (mode: GameMode) => {
+        setSelectedMode(mode)
+      }
+      createMatch: async () => {
+        setIsCreating(true)
+        const match = await callAPI(MatchAPI.POST /matches, {
+          mode: selectedMode,
+          userId: currentUser.id
+        })
+        if (match.status === "queued") {
+          transition("Waiting for Opponent")
+        } else {
+          transition("Start Match")
+        }
+      }
+    }
+    next: "Create Match" | "Waiting for Opponent"
+  }
+  
+  step "Waiting for Opponent" {
+    component: MatchmakingQueue
+    state: {
+      matchId: string
+      elapsedTime: number = 0
+    }
+    actions: {
+      cancel: () => {
+        cancelMatchmaking(matchId)
+        transition("Select Game Mode")
+      }
+    }
+    events: {
+      opponentFound: () => {
+        transition("Start Match")
+      }
+      timeout: () => {
+        showError("Matchmaking timeout")
+        transition("Select Game Mode")
+      }
+    }
+    next: "Start Match" | "Select Game Mode"
+  }
+  
+  step "Start Match" {
+    component: MatchReady
+    state: {
+      match: Match
+      countdown: number = 3
+    }
+    actions: {
+      start: async () => {
+        await callAPI(MatchAPI.POST /matches/:id/start, {
+          id: match.id
+        })
+        transition("Trading Interface")
+      }
+    }
+    autoTransition: {
+      condition: countdown === 0
+      action: start()
+    }
+    next: "Trading Interface"
+  }
+  
+  step "Trading Interface" {
+    component: TradingInterface
+    state: {
+      matchId: string
+      focusedChart: number = 0
+    }
+    actions: {
+      trade: executeTrade
+      closePosition: closePosition
+      exit: () => {
+        if (confirm("Exit match?")) {
+          transition("Match Summary")
+        }
+      }
+    }
+    events: {
+      matchEnded: () => {
+        transition("Match Summary")
+      }
+    }
+    next: "Match Summary"
+  }
+  
+  step "Match Summary" {
+    component: MatchSummary
+    state: {
+      match: Match
+      rankings: Ranking[]
+      playerRank: number
+    }
+    actions: {
+      playAgain: () => {
+        transition("Select Game Mode")
+      }
+      viewReplay: () => {
+        transition("Match Replay")
+      }
+      exit: () => {
+        transition("Main Menu")
+      }
+    }
+    next: "Select Game Mode" | "Match Replay" | "Main Menu"
+  }
+}
+
+flow QuickTrade {
+  step "Focus Chart" {
+    action: pressKey("1-4")
+    result: focusedChart = chartIndex
+    next: "Execute Trade"
+  }
+  
+  step "Execute Trade" {
+    action: pressKey("B" | "S")
+    condition: {
+      "B": executeBuy
+      "S": executeSell
+    }
+    result: {
+      order: Order
+      flashMessage: "BUY/SELL executed"
+    }
+    next: "Continue Trading"
+  }
+  
+  step "Continue Trading" {
+    action: continue
+    loop: true
+  }
+}
+
+flow ClosePosition {
+  step "Check Positions" {
+    condition: hasOpenPositions()
+    if: true
+    then: "Select Position"
+    else: "No Positions"
+  }
+  
+  step "Select Position" {
+    action: pressKey("C")
+    result: closeCurrentPosition()
+    next: "Position Closed"
+  }
+  
+  step "Close All" {
+    action: pressKey("X")
+    result: closeAllPositions()
+    next: "All Positions Closed"
+  }
+  
+  step "Position Closed" {
+    flashMessage: "Position closed"
+    next: "Continue Trading"
+  }
+}

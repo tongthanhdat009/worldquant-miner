@@ -165,10 +165,18 @@ class MiningDuplicateDetector:
         return filtered
     
     def _normalize_template(self, template: str) -> str:
-        """Normalize template for comparison"""
+        """
+        Normalize template for comparison
+        
+        This includes:
+        1. Placeholder normalization (OPERATOR1/OPERATOR2/OPERATOR3 -> OPERATOR_A/OPERATOR_B/OPERATOR_C)
+        2. Whitespace normalization
+        """
         import re
-        # Remove extra whitespace
-        normalized = re.sub(r'\s+', ' ', template.strip())
+        # First normalize placeholders to handle permutations
+        normalized = self.similarity_checker.normalize_placeholders(template)
+        # Then remove extra whitespace
+        normalized = re.sub(r'\s+', ' ', normalized.strip())
         return normalized
     
     def load_seen_templates(self, limit: int = 1000):

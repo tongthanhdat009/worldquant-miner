@@ -1,0 +1,212 @@
+// Game Mechanics Specification
+// Defines game rules, modes, and systems
+
+game TradrPlatform {
+  mode pvp_1v1 {
+    name: "1v1 Duel"
+    type: "pvp"
+    players: 2
+    duration: 60  // minutes
+    initialCapital: 10000
+    market: "random"
+    ranking: true
+    winCondition: {
+      type: "highest_value"
+      at: "end"
+    }
+  }
+  
+  mode pvp_battle_royale {
+    name: "Battle Royale"
+    type: "pvp"
+    players: 10
+    duration: 30
+    initialCapital: 10000
+    market: "random"
+    elimination: true
+    survival: true
+    winCondition: {
+      type: "last_standing"
+      elimination: {
+        threshold: -0.2  // -20% portfolio
+        interval: 300  // every 5 minutes
+      }
+    }
+  }
+  
+  mode pve_ai_challenge {
+    name: "AI Challenge"
+    type: "pve"
+    players: 1
+    duration: 60
+    initialCapital: 10000
+    market: "random"
+    aiOpponent: {
+      difficulty: "hard"
+      strategies: ["trend_following", "mean_reversion", "momentum"]
+    }
+    winCondition: {
+      type: "beat_ai"
+      threshold: 0.05  // 5% better than AI
+    }
+  }
+  
+  mode ranked_matchmaking {
+    name: "Ranked Matchmaking"
+    type: "pvp"
+    players: 2
+    duration: 60
+    initialCapital: 10000
+    market: "random"
+    ranking: true
+    eloSystem: {
+      kFactor: 32
+      initialRating: 1000
+      tiers: [
+        { name: "Bronze", min: 0, max: 1200 },
+        { name: "Silver", min: 1200, max: 1400 },
+        { name: "Gold", min: 1400, max: 1600 },
+        { name: "Platinum", min: 1600, max: 1800 },
+        { name: "Diamond", min: 1800, max: 2000 },
+        { name: "Master", min: 2000, max: 2500 },
+        { name: "Grandmaster", min: 2500, max: Infinity }
+      ]
+    }
+    matchmaking: {
+      eloTolerance: 100
+      maxWaitTime: 300  // 5 minutes
+    }
+  }
+  
+  mechanic eloRating {
+    description: "ELO rating system for competitive ranking"
+    formula: {
+      expectedScore: "1 / (1 + 10^((ratingB - ratingA) / 400))"
+      newRating: "rating + K * (actualScore - expectedScore)"
+      kFactor: 32
+    }
+    update: {
+      trigger: "match_end"
+      condition: "ranked_match"
+    }
+  }
+  
+  mechanic progression {
+    description: "XP and leveling system"
+    xpSources: {
+      trade: 10
+      win: 200
+      achievement: "varies"
+    }
+    levels: [
+      { level: 1, xpRequired: 0, unlocks: ["basic_charts"] },
+      { level: 5, xpRequired: 1000, unlocks: ["advanced_indicators"] },
+      { level: 10, xpRequired: 5000, unlocks: ["multi_chart_4x4"] },
+      { level: 15, xpRequired: 15000, unlocks: ["custom_shortcuts"] },
+      { level: 20, xpRequired: 30000, unlocks: ["ai_opponents"] },
+      { level: 25, xpRequired: 50000, unlocks: ["ranked_matches"] }
+    ]
+  }
+  
+  mechanic achievements {
+    description: "Achievement system for milestones"
+    achievements: [
+      {
+        id: "first_trade"
+        name: "First Trade"
+        description: "Execute your first trade"
+        xpReward: 50
+        condition: "totalTrades >= 1"
+      },
+      {
+        id: "win_10_matches"
+        name: "Decade of Wins"
+        description: "Win 10 matches"
+        xpReward: 200
+        condition: "wins >= 10"
+      },
+      {
+        id: "reach_diamond"
+        name: "Diamond Trader"
+        description: "Reach Diamond tier"
+        xpReward: 500
+        condition: "tier === 'Diamond'"
+      },
+      {
+        id: "1000_apm"
+        name: "Speed Demon"
+        description: "Achieve 1000 APM in a match"
+        xpReward: 300
+        condition: "highestApm >= 1000"
+      },
+      {
+        id: "perfect_match"
+        name: "Flawless Victory"
+        description: "Win a match with 100% win rate"
+        xpReward: 1000
+        condition: "matchWinRate === 1.0 && trades > 0"
+      }
+    ]
+  }
+  
+  rule positionSizing {
+    description: "Position sizing rules"
+    constraints: {
+      minQuantity: 0.01
+      maxQuantity: "portfolioValue * 0.5"  // Max 50% of portfolio
+      minCash: "portfolioValue * 0.1"  // Keep 10% cash
+    }
+    validation: {
+      onBuy: "cash >= quantity * price"
+      onSell: "hasPosition(symbol)"
+    }
+  }
+  
+  rule marketSimulation {
+    description: "Market data simulation"
+    algorithm: "random_walk_with_trend"
+    parameters: {
+      volatility: 0.02
+      trend: 0.001  // Slight upward bias
+      spread: 0.0001  // 0.01% spread
+    }
+    updateFrequency: 10  // 10 updates per second
+  }
+  
+  rule aiTrading {
+    description: "AI trader behavior"
+    difficulties: {
+      easy: {
+        strategy: "trend_following"
+        reactionTime: 2000  // 2 seconds
+        riskTolerance: 0.3
+      }
+      medium: {
+        strategy: "trend_following + mean_reversion"
+        reactionTime: 1000  // 1 second
+        riskTolerance: 0.2
+      }
+      hard: {
+        strategy: "trend_following + mean_reversion + momentum"
+        reactionTime: 500  // 0.5 seconds
+        riskTolerance: 0.1
+        takeProfit: 0.05  // 5% profit target
+      }
+    }
+  }
+  
+  rule realTimeSync {
+    description: "Real-time state synchronization"
+    frequency: 10  // 10 Hz
+    broadcast: {
+      market: "currentPrice, ticks"
+      players: "portfolioValue, positions, stats"
+      leaderboard: "rankings"
+    }
+    lagCompensation: {
+      enabled: true
+      threshold: 500  // 500ms
+      action: "reject_or_adjust"
+    }
+  }
+}

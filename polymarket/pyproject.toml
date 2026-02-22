@@ -1,0 +1,20 @@
+[project]
+name = "polymarket-core"
+version = "0.1.0"
+description = "Prediction-market research framework inspired by modular quant architecture."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0.0",
+    "py-clob-client>=0.34.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-vv -s --durations=10 --durations-min=0.25"
+log_cli = true
+log_cli_level = "INFO"
+console_output_style = "progress"
+
+[tool.setuptools.packages.find]
+include = ["polymarket_core*"]

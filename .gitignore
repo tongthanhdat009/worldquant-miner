@@ -26,6 +26,7 @@ data_fields_cache_*.json
 *v2.json
 
 **/venv
+**/.venv
 
 credentials.json
 credential.json
@@ -61,3 +62,5 @@ build/
 *.rpm
 *.tar.gz
 *.zip
+
+QUANTAXIS

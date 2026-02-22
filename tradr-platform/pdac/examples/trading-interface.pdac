@@ -1,0 +1,199 @@
+// Trading Interface Component Specification
+// Defines the main RTS-style trading interface
+
+component TradingInterface {
+  props {
+    matchId: string
+    onExit: () => void
+  }
+  
+  state {
+    focusedChart: number = 0
+    flashMessage: FlashMessage | null = null
+    matchState: MatchState | null = null
+  }
+  
+  shortcuts {
+    "1": switchToChart(0)
+    "2": switchToChart(1)
+    "3": switchToChart(2)
+    "4": switchToChart(3)
+    "Tab": cycleCharts
+    "B": quickBuy
+    "S": quickSell
+    "C": closePosition
+    "X": closeAll
+    "Esc": exit
+  }
+  
+  layout {
+    header: Header {
+      title: "Tradr Platform"
+      matchInfo: MatchInfo
+      portfolioValue: PortfolioValue
+      exitButton: ExitButton
+    }
+    
+    main: Grid {
+      columns: 3
+      rows: 1
+      items: [
+        MultiChartManager { span: 2 },
+        Sidebar { span: 1 }
+      ]
+    }
+    
+    sidebar: Stack {
+      items: [
+        OrderPanel,
+        PositionPanel,
+        StatsPanel
+      ]
+    }
+    
+    footer: ShortcutHelp
+  }
+  
+  behaviors {
+    onMount: connectWebSocket
+    onUnmount: disconnectWebSocket
+    onChartFocus: updateFocusedChart
+    onTrade: executeTrade
+    onClosePosition: closePosition
+  }
+  
+  events {
+    websocket: {
+      "match_state": updateMatchState
+      "state_sync": syncState
+      "action_executed": showFlashMessage
+      "action_error": showError
+    }
+  }
+}
+
+component MultiChartManager {
+  props {
+    focusedChart: number
+    onChartFocus: (index: number) => void
+    matchState: MatchState | null
+  }
+  
+  state {
+    charts: ChartConfig[] = [
+      { symbol: "BTC/USD", timeframe: "M1" },
+      { symbol: "ETH/USD", timeframe: "M1" },
+      { symbol: "EUR/USD", timeframe: "M1" },
+      { symbol: "GBP/USD", timeframe: "M1" }
+    ]
+  }
+  
+  layout {
+    grid: Grid {
+      columns: 2
+      rows: 2
+      items: charts.map(chart => Chart { config: chart })
+    }
+  }
+}
+
+component Chart {
+  props {
+    symbol: string
+    timeframe: string
+    isFocused: boolean
+    marketData: MarketData | null
+  }
+  
+  layout {
+    container: Container {
+      className: isFocused ? "rts-chart focused" : "rts-chart"
+      children: [
+        Header { symbol, timeframe },
+        Canvas { marketData },
+        Footer { timeframe }
+      ]
+    }
+  }
+}
+
+component OrderPanel {
+  props {
+    socket: WebSocket | null
+    matchId: string
+  }
+  
+  state {
+    orderType: "MARKET" | "LIMIT" | "STOP" = "MARKET"
+    side: "buy" | "sell" = "buy"
+    quantity: number = 0.1
+    price: number | null = null
+  }
+  
+  layout {
+    form: Form {
+      fields: [
+        Select { name: "orderType", options: ["MARKET", "LIMIT", "STOP"] },
+        Toggle { name: "side", options: ["buy", "sell"] },
+        Input { name: "quantity", type: "number", step: 0.01 },
+        Conditional {
+          condition: orderType !== "MARKET"
+          then: Input { name: "price", type: "number" }
+        },
+        Button { label: "Submit Order", onClick: submitOrder }
+      ]
+    }
+  }
+  
+  behaviors {
+    submitOrder: {
+      action: emitWebSocket("player_action", {
+        matchId,
+        action: {
+          type: "trade",
+          orderType,
+          side,
+          quantity,
+          price
+        }
+      })
+    }
+  }
+}
+
+component PositionPanel {
+  props {
+    positions: Position[]
+  }
+  
+  layout {
+    list: Conditional {
+      condition: positions.length === 0
+      then: EmptyState { message: "No open positions" }
+      else: List {
+        items: positions
+          .filter(p => !p.closedAt)
+          .map(position => PositionCard { position })
+      }
+    }
+  }
+}
+
+component StatsPanel {
+  props {
+    stats: Stats
+  }
+  
+  layout {
+    grid: Grid {
+      columns: 2
+      items: [
+        StatItem { label: "Trades", value: stats.trades },
+        StatItem { label: "APM", value: stats.apm.toFixed(1) },
+        StatItem { label: "Accuracy", value: `${(stats.accuracy * 100).toFixed(1)}%` },
+        StatItem { label: "Wins", value: stats.wins },
+        StatItem { label: "Losses", value: stats.losses }
+      ]
+    }
+  }
+}
