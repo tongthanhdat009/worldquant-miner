@@ -64,3 +64,5 @@ build/
 *.zip
 
 QUANTAXIS
+/stone_age
+/.omc
