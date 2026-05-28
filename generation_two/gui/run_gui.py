@@ -7,6 +7,14 @@ import sys
 import os
 import logging
 from pathlib import Path
+import io
+
+# Force UTF-8 output to avoid cp1252 UnicodeEncodeError on Windows Git Bash
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    pass
 
 # Configure logging for terminal trace
 logging.basicConfig(

@@ -172,11 +172,10 @@ class MiningCoordinator:
                 
                 # Generate template
                 try:
-                    template = generator.template_generator.ollama_manager.generate_template(
+                    template = generator.template_generator.generate_template_from_prompt(
                         prompt=f"Generate a WorldQuant Brain FASTEXPR alpha expression for {region} region.",
                         region=region,
-                        available_operators=generator.template_generator.operator_fetcher.operators if generator.template_generator.operator_fetcher else None,
-                        available_fields=generator.template_generator.get_data_fields_for_region(region)
+                        use_ollama=False
                     )
                     
                     if template:

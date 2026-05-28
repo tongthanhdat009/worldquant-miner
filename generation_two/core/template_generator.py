@@ -31,7 +31,11 @@ class TemplateGenerator:
         deepseek_api_key: str = None,
         ollama_url: str = "http://localhost:11434",
         ollama_model: str = "qwen2.5-coder:1.5b",
-        db_path: str = "generation_two_backtests.db"
+        db_path: str = "generation_two_backtests.db",
+        custom_api_url: str = None,
+        custom_api_key: str = None,
+        custom_api_model: str = None,
+        custom_api_system_prompt: str = None,
     ):
         """
         Initialize template generator
@@ -43,11 +47,18 @@ class TemplateGenerator:
             ollama_url: Ollama server URL
             ollama_model: Ollama model name
             db_path: Path to database for storing compiler knowledge
+            custom_api_url: Custom OpenAI-compatible API base URL (e.g. 9router, local proxy)
+            custom_api_key: API key for custom endpoint
+            custom_api_model: Model name for custom endpoint
         """
         self.credentials_path = credentials_path
         self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
+        self.custom_api_url = custom_api_url
+        self.custom_api_key = custom_api_key
+        self.custom_api_model = custom_api_model
+        self.custom_api_system_prompt = custom_api_system_prompt
         # Create session with cookie persistence enabled (default, but explicit)
         self.sess = requests.Session()
         # Ensure cookies are maintained across requests
@@ -77,6 +88,19 @@ class TemplateGenerator:
             self.setup_auth()
             self._setup_data_fetchers()
     
+    def _validator_llm_generate(self, prompt: str, max_tokens: int = 500) -> Optional[str]:
+        """Custom API callback used by TemplateValidator; Ollama disabled."""
+        return self._generate_with_custom_api(
+            prompt=prompt,
+            region="USA",
+            dataset_categories=None,
+            system_prompt_override=(
+                "You are a WorldQuant Brain FASTEXPR repair assistant. "
+                "Return concise diagnostics or exactly one corrected FASTEXPR expression when asked. "
+                "Never use markdown unless explicitly requested."
+            ),
+        )
+
     def setup_auth(self):
         """Setup authentication for WorldQuant Brain API with session persistence"""
         try:
@@ -187,9 +211,10 @@ class TemplateGenerator:
             self.template_validator = TemplateValidator(
                 operators=operators if operators else [],
                 data_fields=[],  # Will be updated per region
-                ollama_manager=self.ollama_manager,
+                ollama_manager=None,
                 db_path=self.db_path,
-                use_ast=False  # Disable AST by default, use prompt engineering and database knowledge only
+                use_ast=False,  # Disable AST by default, use prompt engineering and database knowledge only
+                llm_generate_func=self._validator_llm_generate
             )
             logger.info("✅ Template validator initialized (AST disabled, using prompt engineering and database knowledge)")
                 
@@ -287,132 +312,28 @@ class TemplateGenerator:
         theme_requirements = self.theme_manager.get_theme_requirements(region)
         dataset_categories = self.theme_manager.get_required_categories(region)
         
-        # Try Ollama first (smart fallback)
-        if use_ollama and self.ollama_manager.is_available:
-            # Get avoidance context to prevent duplicates
-            avoidance_context = self.duplicate_detector.get_avoidance_context(limit=10)
-            
-            # Get available operators and fields for enhanced prompt
-            available_operators = None
-            available_fields = None
-            successful_patterns = None
-            
-            if self.operator_fetcher:
-                available_operators = self.operator_fetcher.operators if hasattr(self.operator_fetcher, 'operators') else None
-            
-            if self.template_validator and self.template_validator.use_ast and self.template_validator.corrector:
-                # Get AST-extracted patterns for better guidance
-                successful_patterns = self.template_validator.corrector.get_successful_patterns(limit=5)
-            
-            # Get fields for the region if available
-            try:
-                region_fields = self.get_data_fields_for_region(region)
-                if region_fields:
-                    available_fields = region_fields
-            except:
-                pass  # Non-critical, continue without fields
-            
-            template = self.ollama_manager.generate_template(
-                prompt,
-                region=region,
-                dataset_categories=dataset_categories if dataset_categories else None,
-                avoid_duplicates_context=avoidance_context,
-                available_operators=available_operators,
-                available_fields=available_fields,
-                successful_patterns=successful_patterns
-            )
-            
+        # Try Custom API first (9router / OpenAI-compatible)
+        if self.custom_api_key and self.custom_api_url:
+            logger.info(f"Using Custom API model: {self.custom_api_model} at {self.custom_api_url}")
+            template = self._generate_with_custom_api(prompt, region, dataset_categories)
             if template:
-                # Check for duplicates
-                if self.duplicate_detector.is_duplicate(template):
-                    logger.warning(f"Generated duplicate template, retrying: {template[:50]}...")
-                    # Retry once with stronger avoidance context
-                    stronger_context = self.duplicate_detector.get_avoidance_context(limit=20)
-                    # Get available operators and fields for retry
-                    available_operators = None
-                    available_fields = None
-                    successful_patterns = None
-                    
-                    if self.operator_fetcher:
-                        available_operators = self.operator_fetcher.operators if hasattr(self.operator_fetcher, 'operators') else None
-                    
-                    if self.template_validator and self.template_validator.use_ast and self.template_validator.corrector:
-                        successful_patterns = self.template_validator.corrector.get_successful_patterns(limit=5)
-                    
-                    try:
-                        region_fields = self.get_data_fields_for_region(region)
-                        if region_fields:
-                            available_fields = region_fields
-                    except:
-                        pass
-                    
-                    template = self.ollama_manager.generate_template(
-                        prompt + "\n\nIMPORTANT: Avoid generating expressions similar to recent ones.",
-                        region=region,
-                        dataset_categories=dataset_categories if dataset_categories else None,
-                        avoid_duplicates_context=stronger_context,
-                        available_operators=available_operators,
-                        available_fields=available_fields,
-                        successful_patterns=successful_patterns
-                    )
-                
-                if template and not self.duplicate_detector.is_duplicate(template):
-                    # Register the new expression
-                    self.duplicate_detector.register_expression(template, region)
-                    logger.debug("Generated template using Ollama")
-                    return template
-                elif template:
-                    logger.warning("Generated template is still a duplicate, skipping")
-                    return None
-        
+                logger.info(f"Generated template using Custom API model: {self.custom_api_model}")
+                return template
+            logger.warning("Custom API failed; Ollama fallback disabled")
+            return self._generate_fallback_template(prompt, region)
+
+        # Ollama disabled: never call local Ollama in this build
+        # Fallback to Custom API (9router / OpenAI-compatible)
+        if self.custom_api_key and self.custom_api_url:
+            return self._generate_with_custom_api(prompt, region, dataset_categories)
+
         # Fallback to DeepSeek API
         if self.deepseek_api_key:
             return self._generate_with_deepseek(prompt, region, dataset_categories)
-        
+
         # Final fallback
         logger.warning("No LLM available, using fallback generation")
         return self._generate_fallback_template(prompt, region)
-        
-        try:
-            # Call DeepSeek API
-            response = requests.post(
-                'https://api.deepseek.com/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {self.deepseek_api_key}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'model': 'deepseek-chat',
-                    'messages': [
-                        {
-                            'role': 'system',
-                            'content': 'You are an expert in quantitative finance. Generate WorldQuant Brain alpha expressions in FASTEXPR format.'
-                        },
-                        {
-                            'role': 'user',
-                            'content': prompt
-                        }
-                    ],
-                    'temperature': 0.7,
-                    'max_tokens': 500
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                template = result['choices'][0]['message']['content'].strip()
-                # Extract code if wrapped in markdown
-                if '```' in template:
-                    lines = template.split('\n')
-                    template = '\n'.join([l for l in lines if not l.strip().startswith('```')])
-                return template
-            else:
-                logger.error(f"DeepSeek API error: {response.status_code}")
-                return self._generate_fallback_template(prompt)
-                
-        except Exception as e:
-            logger.error(f"Error calling DeepSeek API: {e}")
-            return self._generate_fallback_template(prompt)
     
     def _generate_with_deepseek(
         self, 
@@ -459,6 +380,140 @@ class TemplateGenerator:
         
         return None
     
+
+    def generate_fast_expr_with_custom_api(
+        self,
+        prompt: str,
+        region: str,
+        available_operators: List[Dict] = None,
+        available_fields: List[Dict] = None,
+        system_prompt: str = None,
+    ) -> Optional[str]:
+        """Generate one WorldQuant FASTEXPR expression using custom API only."""
+        if not self.custom_api_key or not self.custom_api_url:
+            logger.error("Custom API is not configured")
+            return None
+
+        op_context = ""
+        if available_operators:
+            op_context = "\n".join([
+                f"- {op.get('name', '')}: {op.get('definition', op.get('signature', ''))} | {op.get('description', '')[:160]}"
+                for op in available_operators[:12]
+            ])
+
+        field_context = ""
+        if available_fields:
+            field_context = "\n".join([
+                f"- {field.get('id', '')}: {field.get('description', '')[:140]}"
+                for field in available_fields[:20]
+            ])
+
+        if system_prompt is None:
+            system_prompt = self.custom_api_system_prompt or (
+                "You are an expert WorldQuant Brain alpha researcher. "
+                "Return exactly one valid FASTEXPR expression. "
+                "No markdown, no explanation, no placeholders. "
+                "Respect operator signatures and arity exactly."
+            )
+
+        full_prompt = f"""{prompt}
+
+Region: {region}
+
+Allowed operators:
+{op_context}
+
+Allowed fields:
+{field_context}
+
+Rules:
+- Return only one expression.
+- Use real operator names and real field ids.
+- Do not use OPERATOR1/DATA_FIELD1 placeholders.
+- Prefer simple valid expressions with 2-4 operators.
+- Respect every operator signature exactly.
+"""
+
+        return self._generate_with_custom_api(
+            prompt=full_prompt,
+            region=region,
+            dataset_categories=None,
+            system_prompt_override=system_prompt,
+        )
+
+    def _generate_with_custom_api(
+        self,
+        prompt: str,
+        region: str,
+        dataset_categories: List[str],
+        system_prompt_override: str = None,
+    ) -> Optional[str]:
+        """Generate using custom OpenAI-compatible API (9router / local proxy / etc.)"""
+        try:
+            system_prompt = system_prompt_override or 'You are an expert in quantitative finance. Generate WorldQuant Brain alpha expressions in FASTEXPR format.'
+            user_prompt = f"Region: {region}\n{prompt}"
+
+            if dataset_categories:
+                user_prompt += f"\nRequired categories: {', '.join(dataset_categories)}"
+
+            # Ensure URL ends with /v1 (but not /v1/...)
+            base_url = self.custom_api_url.rstrip('/')
+            if not base_url.endswith('/v1'):
+                # If user gave e.g. http://host:port, append /v1
+                base_url = base_url + '/v1'
+            chat_url = f"{base_url}/chat/completions"
+
+            model = self.custom_api_model or "gpt-3.5-turbo"
+
+            logger.info(f"Calling custom API: {chat_url} model={model}")
+
+            # Try with common params; retry with different settings if API rejects
+            payloads = [
+                {'model': model, 'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ], 'temperature': 1.0, 'max_tokens': 500, 'stream': False},
+                {'model': model, 'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ], 'stream': False},
+                {'model': model, 'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ], 'temperature': 0.7, 'max_tokens': 500, 'stream': False},
+            ]
+
+            for attempt, payload in enumerate(payloads):
+                response = requests.post(
+                    chat_url,
+                    headers={
+                        'Authorization': f'Bearer {self.custom_api_key}',
+                        'Content-Type': 'application/json'
+                    },
+                    json=payload,
+                    timeout=30
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    template = result['choices'][0]['message']['content'].strip()
+                    if '```' in template:
+                        lines = template.split('\n')
+                        template = '\n'.join([l for l in lines if not l.strip().startswith('```')])
+                    logger.debug("Generated template using Custom API")
+                    return template
+                elif response.status_code == 400 and attempt < 2:
+                    logger.warning(f"Custom API rejected params (attempt {attempt+1}), retrying with fewer params: {response.text[:150]}")
+                    continue
+                else:
+                    logger.error(f"Custom API error {response.status_code}: {response.text[:200]}")
+                    break
+
+        except Exception as e:
+            logger.error(f"Custom API error: {e}")
+
+        return None
+
     def _generate_fallback_template(self, prompt: str, region: str = "USA") -> str:
         """Fallback template generation"""
         # Simple fallback - would use more sophisticated logic in production
@@ -760,20 +815,8 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     else:
                         selected_operators = available_operators
                     
-                    # Step 3: Generate template with placeholders
-                    template = self.generate_template_from_prompt(prompt, region=region, use_ollama=True)
-                    
-                    # If generation failed, try direct Ollama call with placeholder approach
-                    if not template and self.ollama_manager.is_available:
-                        template = self.ollama_manager.generate_template(
-                            prompt,
-                            region=region,
-                            avoid_duplicates_context=avoidance_context,
-                            available_operators=selected_operators,
-                            available_fields=selected_fields,  # Pass selected fields for placeholder mapping
-                            successful_patterns=successful_patterns,
-                            use_placeholder_fields=True  # Enable V2 placeholder approach
-                        )
+                    # Step 3: Generate template with placeholders (Custom API only; Ollama disabled)
+                    template = self.generate_template_from_prompt(prompt, region=region, use_ollama=False)
                     
                     # Step 4: Replace placeholders with actual operator names and field IDs
                     if template and selected_operators:

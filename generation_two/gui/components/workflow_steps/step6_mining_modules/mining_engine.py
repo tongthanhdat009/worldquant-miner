@@ -146,9 +146,6 @@ class MiningEngine:
             if not region:
                 return (None, None)
             
-            # Use algorithmic generation (like Step 4) - generates placeholders
-            from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
-            
             available_operators = self.generator.template_generator.operator_fetcher.operators if self.generator.template_generator.operator_fetcher else None
             available_fields = self.generator.template_generator.get_data_fields_for_region(region)
             
@@ -156,52 +153,45 @@ class MiningEngine:
                 logger.warning(f"No operators or fields available for {region}")
                 return (None, None)
             
-            # Generate placeholder template algorithmically
-            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
-            
-            # Try up to 10 times to generate a template different from database
-            max_retries = 10
+            # Generate via Custom API / 9router only (no random algorithmic placeholders)
+            max_retries = 3
             for retry in range(max_retries):
-                template_with_placeholders = generator.generate_placeholder_expression(
-                    max_operators=5,
-                    method='random'  # Can be 'random', 'brownian', 'tree', 'linear'
+                template = self.generator.template_generator.generate_fast_expr_with_custom_api(
+                    prompt=f"Generate one robust WorldQuant Brain FASTEXPR alpha for continuous mining. Avoid invalid arity/input count errors.",
+                    region=region,
+                    available_operators=available_operators,
+                    available_fields=available_fields,
                 )
+                if not template:
+                    continue
+                template = template.replace('`', '').strip()
                 
-                if not template_with_placeholders:
+                # Check duplicates
+                is_dup, reason = self.duplicate_detector.is_duplicate(template, region)
+                if is_dup:
+                    logger.debug(f"Generated duplicate template from 9router: {reason}")
                     continue
                 
-                # Check if different from database
                 if self.backtest_storage:
                     existing_templates = self.backtest_storage.get_all_templates(region=region, limit=1000)
-                    if template_with_placeholders not in existing_templates:
-                        # Check duplicates
-                        is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                        if not is_dup:
-                            # Store in database
-                            from generation_two.core import template_similarity
-                            similarity_checker = template_similarity.TemplateSimilarityChecker()
-                            operators_used = list(similarity_checker.extract_operators(template_with_placeholders))
-                            fields_used = list(similarity_checker.extract_fields(template_with_placeholders))
-                            
-                            self.backtest_storage.store_template(
-                                template=template_with_placeholders,
-                                region=region,
-                                operators_used=operators_used,
-                                fields_used=fields_used
-                            )
-                            
-                            self.templates_generated_count += 1
-                            return (template_with_placeholders, region)
-                    else:
-                        logger.debug(f"Generated template already exists in database, retrying...")
-                else:
-                    # No database, just check duplicates
-                    is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                    if not is_dup:
-                        self.templates_generated_count += 1
-                        return (template_with_placeholders, region)
+                    if template in existing_templates:
+                        logger.debug("Generated template already exists in database, retrying...")
+                        continue
+                    from generation_two.core import template_similarity
+                    similarity_checker = template_similarity.TemplateSimilarityChecker()
+                    operators_used = list(similarity_checker.extract_operators(template))
+                    fields_used = list(similarity_checker.extract_fields(template))
+                    self.backtest_storage.store_template(
+                        template=template,
+                        region=region,
+                        operators_used=operators_used,
+                        fields_used=fields_used
+                    )
+                
+                self.templates_generated_count += 1
+                return (template, region)
             
-            logger.debug(f"Could not generate unique template after {max_retries} retries")
+            logger.debug(f"Could not generate unique 9router template after {max_retries} retries")
             return (None, None)
                     
         except Exception as e:
@@ -358,7 +348,7 @@ class MiningEngine:
     def _run_simulation(self, slot_id: int, template: str, region: str):
         """Run a single simulation with placeholder replacement"""
         try:
-            # Replace placeholders using Ollama selection (like Step 5)
+            # Replace placeholders locally (Ollama disabled; 9router only for LLM generation)
             template_with_placeholders = template
             if self.generator and self.generator.template_generator:
                 available_operators = None
@@ -367,137 +357,34 @@ class MiningEngine:
                 
                 available_fields = self.generator.template_generator.get_data_fields_for_region(region)
                 
-                # Check if template has placeholders
                 has_operator_placeholders = template and ('OPERATOR' in template.upper() or 'operator' in template.lower())
                 has_field_placeholders = template and ('DATA_FIELD' in template.upper() or 'data_field' in template.lower())
                 
                 if (has_operator_placeholders or has_field_placeholders) and available_operators and available_fields:
                     slot = self.slot_manager.get_slot_status(slot_id)
                     if slot:
-                        slot.add_log("🤖 Asking Ollama to select operators and fields...")
-                    
-                    def progress_callback(msg):
-                        slot = self.slot_manager.get_slot_status(slot_id)
-                        if slot:
-                            slot.add_log(f"🤖 {msg}")
-                    
-                    # Use Ollama to select and replace
-                    if hasattr(self.generator.template_generator, 'ollama_manager'):
-                        # Get backtest_storage for field usage tracking
-                        backtest_storage = None
-                        if hasattr(self.generator, 'backtest_storage'):
-                            backtest_storage = self.generator.backtest_storage
-                        
-                        replaced = self.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                            template,
-                            available_operators,
-                            available_fields,
-                            progress_callback=progress_callback,
-                            region=region,
-                            backtest_storage=backtest_storage
+                        slot.add_log("🔁 Replacing placeholders locally (Ollama disabled)...")
+
+                    if has_operator_placeholders:
+                        template = self.generator.template_generator._replace_operator_placeholders(
+                            template, available_operators
                         )
-                        if replaced:
-                            template = replaced
-                            # Verify all placeholders were actually replaced
-                            import re
-                            remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
-                            remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
-                            
-                            if remaining_ops or remaining_fields:
-                                slot = self.slot_manager.get_slot_status(slot_id)
-                                if slot:
-                                    slot.add_log(f"⚠️ Some placeholders not replaced! Remaining: {remaining_ops + remaining_fields}")
-                                    slot.add_log("🔄 Retrying placeholder replacement...")
-                                # Retry once more
-                                # Get backtest_storage for field usage tracking
-                                backtest_storage = None
-                                if hasattr(self.generator, 'backtest_storage'):
-                                    backtest_storage = self.generator.backtest_storage
-                                
-                                replaced_retry = self.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                    template,
-                                    available_operators,
-                                    available_fields,
-                                    progress_callback=progress_callback,
-                                    region=region,
-                                    backtest_storage=backtest_storage
-                                )
-                                if replaced_retry:
-                                    template = replaced_retry
-                                    # Check again
-                                    remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
-                                    remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
-                                    if remaining_ops or remaining_fields:
-                                        slot = self.slot_manager.get_slot_status(slot_id)
-                                        if slot:
-                                            slot.add_log(f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
-                                            slot.add_log(f"❌ Skipping submission - template: {template[:100]}...")
-                                        self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
-                                        return
-                                    else:
-                                        slot = self.slot_manager.get_slot_status(slot_id)
-                                        if slot:
-                                            slot.add_log("✅ All placeholders replaced after retry")
-                                else:
-                                    slot = self.slot_manager.get_slot_status(slot_id)
-                                    if slot:
-                                        slot.add_log("❌ Retry replacement failed, skipping submission")
-                                    self.slot_manager.release_slot(slot_id, success=False, error="Placeholder replacement failed")
-                                    return
-                            else:
-                                slot = self.slot_manager.get_slot_status(slot_id)
-                                if slot:
-                                    slot.add_log("✅ Ollama selection completed, all placeholders replaced")
-                        else:
-                            slot = self.slot_manager.get_slot_status(slot_id)
-                            if slot:
-                                slot.add_log("⚠️ Ollama selection failed, using fallback replacement")
-                            # Fallback to old method
-                            if has_operator_placeholders:
-                                template = self.generator.template_generator._replace_operator_placeholders(
-                                    template, available_operators
-                                )
-                            if has_field_placeholders:
-                                template = self.generator.template_generator._replace_field_placeholders(
-                                    template, available_fields, region
-                                )
-                            # Verify fallback worked
-                            import re
-                            remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
-                            remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
-                            if remaining_ops or remaining_fields:
-                                slot = self.slot_manager.get_slot_status(slot_id)
-                                if slot:
-                                    slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                                self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
-                                return
-                    else:
-                        # Fallback to old method
-                        if has_operator_placeholders:
-                            template = self.generator.template_generator._replace_operator_placeholders(
-                                template, available_operators
-                            )
-                        if has_field_placeholders:
-                            template = self.generator.template_generator._replace_field_placeholders(
-                                template, available_fields, region
-                            )
-                        # Verify fallback worked
-                        import re
-                        remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
-                        remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
-                        if remaining_ops or remaining_fields:
-                            slot = self.slot_manager.get_slot_status(slot_id)
-                            if slot:
-                                slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                            self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
-                            return
-            
-            settings = SimulationSettings(
-                universe=REGION_DEFAULT_UNIVERSE.get(region, 'TOP3000'),
-                neutralization=REGION_DEFAULT_NEUTRALIZATION.get(region, 'INDUSTRY'),
-                delay=1,
-                testPeriod="P5Y0M0D"
-            )
+                    if has_field_placeholders:
+                        template = self.generator.template_generator._replace_field_placeholders(
+                            template, available_fields, region
+                        )
+
+                    import re
+                    remaining_ops = re.findall(r'(OPERATOR\d+|operator\d+|Operator\d+)', template, re.IGNORECASE)
+                    remaining_fields = re.findall(r'(DATA_FIELD\d+|data_field\d+|Data_Field\d+)', template, re.IGNORECASE)
+                    if remaining_ops or remaining_fields:
+                        if slot:
+                            slot.add_log(f"❌ Local placeholder replacement incomplete: {remaining_ops + remaining_fields}")
+                            slot.add_log(f"❌ Skipping submission - template: {template[:100]}...")
+                        self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                        return
+                    elif slot:
+                        slot.add_log("✅ Local placeholder replacement completed")
             
             # Final check: Ensure NO placeholders remain before submission
             import re
@@ -524,6 +411,12 @@ class MiningEngine:
             self.slot_manager.update_slot_progress(slot_id, percent=10, message="Submitting...", api_status="PENDING")
             self._update_slot(slot_id, template, region, 10, "Submitting...")
 
+            settings = SimulationSettings(
+                region=region,
+                universe=REGION_DEFAULT_UNIVERSE.get(region, "TOP3000"),
+                neutralization=REGION_DEFAULT_NEUTRALIZATION.get(region, "INDUSTRY"),
+            )
+
             # Submit
             progress_url = self.simulator_tester.submit_simulation(template, region, settings)
             if not progress_url:
@@ -532,11 +425,12 @@ class MiningEngine:
             
             # Monitor
             def progress_callback(percent, message, api_status):
+                display_status = self._display_status_from_api(api_status)
                 self.slot_manager.update_slot_progress(slot_id, percent=percent, message=message, api_status=api_status)
                 slot = self.slot_manager.get_slot_status(slot_id)
                 if slot:
                     slot.add_log(f"[{api_status}] {message}")
-                self._update_slot(slot_id, template, region, percent, message)
+                self._update_slot(slot_id, template, region, percent, message, display_status)
             
             result = self.simulator_tester.monitor_simulation(
                 progress_url, template, region, settings,
@@ -617,43 +511,18 @@ class MiningEngine:
 
             available_fields = self.generator.template_generator.get_data_fields_for_region(region)
 
-            if available_operators and available_fields and hasattr(self.generator.template_generator, 'ollama_manager'):
-                def progress_callback_refeed(msg):
-                    slot = self.slot_manager.get_slot_status(slot_id)
-                    if slot:
-                        slot.add_log(f"🤖 {msg}")
-
-                # Get backtest_storage for field usage tracking
-                backtest_storage = None
-                if hasattr(self.generator, 'backtest_storage'):
-                    backtest_storage = self.generator.backtest_storage
-                
-                replaced = self.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                    template,
-                    available_operators,
-                    available_fields,
-                    progress_callback=progress_callback_refeed,
-                    region=region,
-                    backtest_storage=backtest_storage
-                )
-                if replaced:
-                    template = replaced
-                    slot = self.slot_manager.get_slot_status(slot_id)
-                    if slot:
-                        slot.add_log("✅ Placeholders replaced before refeed")
-                else:
-                    slot = self.slot_manager.get_slot_status(slot_id)
-                    if slot:
-                        slot.add_log("⚠️ Placeholder replacement failed, using fallback")
-                    # Fallback to old method
-                    if has_operator_placeholders:
-                        template = self.generator.template_generator._replace_operator_placeholders(
-                            template, available_operators
-                        )
-                    if has_field_placeholders:
-                        template = self.generator.template_generator._replace_field_placeholders(
-                            template, available_fields, region
-                        )
+            if available_operators and available_fields:
+                if has_operator_placeholders:
+                    template = self.generator.template_generator._replace_operator_placeholders(
+                        template, available_operators
+                    )
+                if has_field_placeholders:
+                    template = self.generator.template_generator._replace_field_placeholders(
+                        template, available_fields, region
+                    )
+                slot = self.slot_manager.get_slot_status(slot_id)
+                if slot:
+                    slot.add_log("✅ Placeholders replaced before refeed (local)")
 
         # Check if event input error (unlimited retries)
         is_event_input_error = 'does not support event inputs' in error_message.lower()
@@ -675,31 +544,15 @@ class MiningEngine:
 
                 available_fields = self.generator.template_generator.get_data_fields_for_region(region)
 
-                if available_operators and available_fields and hasattr(self.generator.template_generator, 'ollama_manager'):
-                    # Get backtest_storage for field usage tracking
-                    backtest_storage = None
-                    if hasattr(self.generator, 'backtest_storage'):
-                        backtest_storage = self.generator.backtest_storage
-                    
-                    replaced_again = self.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                        fixed_template,
-                        available_operators,
-                        available_fields,
-                        region=region,
-                        backtest_storage=backtest_storage
-                    )
-                    if replaced_again:
-                        fixed_template = replaced_again
-                    else:
-                        # Fallback
-                        if has_op_ph and available_operators:
-                            fixed_template = self.generator.template_generator._replace_operator_placeholders(
-                                fixed_template, available_operators
-                            )
-                        if has_field_ph and available_fields:
-                            fixed_template = self.generator.template_generator._replace_field_placeholders(
-                                fixed_template, available_fields, region
-                            )
+                if available_operators and available_fields:
+                    if has_op_ph:
+                        fixed_template = self.generator.template_generator._replace_operator_placeholders(
+                            fixed_template, available_operators
+                        )
+                    if has_field_ph:
+                        fixed_template = self.generator.template_generator._replace_field_placeholders(
+                            fixed_template, available_fields, region
+                        )
             
             # Final check: Ensure NO placeholders remain before resubmission
             remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', fixed_template, re.IGNORECASE)
@@ -733,6 +586,15 @@ class MiningEngine:
         
         return None
     
+    def _display_status_from_api(self, api_status: str) -> str:
+        """Map WorldQuant API status to UI slot status."""
+        normalized = (api_status or "").upper()
+        if normalized in {"FAILED", "ERROR"}:
+            return "FAILED"
+        if normalized in {"COMPLETE", "COMPLETED", "SUCCESS"}:
+            return "COMPLETED"
+        return "RUNNING"
+
     def _update_slot(self, slot_id: int, template: str, region: str, progress: float, message: str, status: str = "RUNNING"):
         """Update slot display"""
         if self.update_slot_callback:

@@ -19,6 +19,23 @@ from ..self_evolution import EvolutionExecutor, CodeGenerator, CodeEvaluator
 logger = logging.getLogger(__name__)
 
 
+def _resolve_db_path(db_path: str) -> str:
+    """Resolve DB path to the Generation Two DB when relative paths would create empty cwd DBs."""
+    if os.path.isabs(db_path):
+        return db_path
+
+    generation_two_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    package_db = os.path.join(generation_two_dir, db_path)
+    cwd_db = os.path.abspath(db_path)
+
+    # Prefer existing package DB with real data; GUI may launch from repo root otherwise.
+    if os.path.exists(package_db) and os.path.getsize(package_db) > 0:
+        return package_db
+    if os.path.exists(cwd_db) and os.path.getsize(cwd_db) > 0:
+        return cwd_db
+    return package_db
+
+
 class EnhancedTemplateGeneratorV3:
     """
     Generation Two: Modular implementation
@@ -38,7 +55,11 @@ class EnhancedTemplateGeneratorV3:
         deepseek_api_key: str = None,
         db_path: str = "generation_two_backtests.db",
         ollama_url: str = "http://localhost:11434",
-        ollama_model: str = "qwen2.5-coder:1.5b"
+        ollama_model: str = "qwen2.5-coder:1.5b",
+        custom_api_url: str = None,
+        custom_api_key: str = None,
+        custom_api_model: str = None,
+        custom_api_system_prompt: str = None,
     ):
         """
         Initialize Generation Two system
@@ -50,7 +71,13 @@ class EnhancedTemplateGeneratorV3:
             db_path: Path to backtest storage database
             ollama_url: Ollama server URL
             ollama_model: Ollama model name
+            custom_api_url: Custom OpenAI-compatible API base URL
+            custom_api_key: API key for custom endpoint
+            custom_api_model: Model name for custom endpoint
         """
+        db_path = _resolve_db_path(db_path)
+        logger.info(f"Using backtest DB: {db_path}")
+        
         # Initialize modular components with Ollama support
         self.template_generator = TemplateGenerator(
             credentials_path=credentials_path,
@@ -58,7 +85,11 @@ class EnhancedTemplateGeneratorV3:
             deepseek_api_key=deepseek_api_key,
             ollama_url=ollama_url,
             ollama_model=ollama_model,
-            db_path=db_path  # Pass database path to template generator
+            db_path=db_path,  # Pass database path to template generator
+            custom_api_url=custom_api_url,
+            custom_api_key=custom_api_key,
+            custom_api_model=custom_api_model,
+            custom_api_system_prompt=custom_api_system_prompt,
         )
         
         # Theme manager
@@ -224,7 +255,7 @@ class EnhancedTemplateGeneratorV3:
                 template = self.template_generator.generate_template_from_prompt(
                     prompt,
                     region=region,
-                    use_ollama=True  # Smart Ollama with fallback
+                    use_ollama=False  # Ollama disabled; use Custom API / 9router
                 )
                 if template:
                     templates.append(template)
@@ -349,15 +380,28 @@ class EnhancedTemplateGeneratorV3:
         return self.retrospect.generate_insights(results)
     
     def get_system_stats(self) -> Dict:
-        """Get overall system statistics"""
+        """Get overall system statistics, preferring persisted DB stats for dashboard counts."""
+        storage_stats = self.backtest_storage.get_statistics()
+        db_total = int(storage_stats.get('total', 0) or 0)
+        db_successful = int(storage_stats.get('successful', 0) or 0)
+
+        total_results = max(len(self.all_results), db_total)
+        successful_alphas = max(len(self.successful_alphas), db_successful)
+
         stats = {
-            'total_results': len(self.all_results),
-            'successful_alphas': len(self.successful_alphas),
+            'total_results': total_results,
+            'successful_alphas': successful_alphas,
             'evolution_cycles': self.evolution_count,
             'pending_tests': self.on_the_fly_tester.get_pending_tests_count(),
             'tracked_alphas': len(self.quality_monitor.get_all_alpha_ids()),
-            'storage_stats': self.backtest_storage.get_statistics(),
-            'ollama_stats': self.template_generator.ollama_manager.get_stats(),
+            'storage_stats': storage_stats,
+            'success_rate': storage_stats.get('success_rate', 0.0),
+            'avg_sharpe': storage_stats.get('avg_sharpe', 0.0),
+            'llm_stats': {
+                'provider': 'custom_api' if self.template_generator.custom_api_url else 'fallback',
+                'model': self.template_generator.custom_api_model or '',
+                'url': self.template_generator.custom_api_url or '',
+            },
             'active_themes': {
                 region: self.theme_manager.is_theme_active(region)
                 for region in ['IND', 'ATOM']

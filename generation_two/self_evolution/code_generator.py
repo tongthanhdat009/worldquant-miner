@@ -35,14 +35,16 @@ class CodeGenerator:
     - Integration modules
     """
     
-    def __init__(self, ollama_manager=None):
+    def __init__(self, ollama_manager=None, llm_generate_func=None):
         """
         Initialize code generator
         
         Args:
-            ollama_manager: OllamaManager for AI-assisted code generation
+            ollama_manager: Deprecated; Ollama disabled
+            llm_generate_func: Custom API text generation callback
         """
-        self.ollama_manager = ollama_manager
+        self.ollama_manager = None
+        self.llm_generate_func = llm_generate_func
         self.generated_modules = []
         self.module_templates = []
     
@@ -210,7 +212,7 @@ def {function_name}(result: Dict) -> float:
         module_type: str = "strategy"
     ) -> Optional[str]:
         """
-        Generate code using Ollama
+        Generate code using Custom API (legacy method name kept for compatibility)
         
         Args:
             prompt: Description of what to generate
@@ -219,8 +221,8 @@ def {function_name}(result: Dict) -> float:
         Returns:
             Generated code or None
         """
-        if not self.ollama_manager or not self.ollama_manager.is_available:
-            logger.warning("Ollama not available for code generation")
+        if not self.llm_generate_func:
+            logger.warning("Custom API not available for code generation")
             return None
         
         system_prompt = """You are an expert Python developer specializing in quantitative finance and optimization.
@@ -240,7 +242,10 @@ Requirements:
 
 Return only the Python code:"""
         
-        code = self.ollama_manager.generate(user_prompt, system_prompt, temperature=0.3, max_tokens=1000)
+        try:
+            code = self.llm_generate_func(prompt=user_prompt, system_prompt=system_prompt, max_tokens=1000)
+        except TypeError:
+            code = self.llm_generate_func(user_prompt)
         
         if code:
             # Validate syntax

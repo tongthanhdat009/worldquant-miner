@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 print("[main_window] Importing tkinter...", flush=True)
 import tkinter as tk
-print("[main_window]   ✓ tkinter", flush=True)
+print("[main_window]   OK tkinter", flush=True)
 from tkinter import ttk, messagebox
 print("[main_window]   ✓ tkinter.ttk, messagebox", flush=True)
 import json
@@ -95,7 +95,14 @@ class CyberpunkGUI:
         
         # Initialize evolution components
         if self.generator:
-            code_gen = CodeGenerator(ollama_manager=self.generator.template_generator.ollama_manager)
+            def code_llm_generate(prompt: str, system_prompt: str = None, max_tokens: int = 1000):
+                return self.generator.template_generator._generate_with_custom_api(
+                    prompt=prompt,
+                    region="USA",
+                    dataset_categories=None,
+                    system_prompt_override=system_prompt,
+                )
+            code_gen = CodeGenerator(llm_generate_func=code_llm_generate)
             code_eval = CodeEvaluator()
             self.evolution_executor = EvolutionExecutor(
                 code_gen,
@@ -178,8 +185,55 @@ class CyberpunkGUI:
             creds = self.credential_manager.get_credentials()
             credentials = [creds.username, creds.password]
             
+            # Custom API config: 1) .env file, 2) GUI config section, 3) env vars
+            custom_api_url = None
+            custom_api_key = None
+            custom_api_model = None
+            custom_api_system_prompt = None
+            custom_api_enabled = True
+
+            # Load .env file if exists
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+            if os.path.exists(env_path):
+                try:
+                    from dotenv import load_dotenv
+                    load_dotenv(env_path, override=True)
+                    logger.info(f"Loaded .env from {env_path}")
+                except ImportError:
+                    logger.debug("python-dotenv not installed, skipping .env")
+            else:
+                logger.debug(f"No .env file at {env_path}")
+
+            # Priority: .env > config_manager section > system env vars
+            custom_api_url = os.environ.get("CUSTOM_API_URL")
+            custom_api_key = os.environ.get("CUSTOM_API_KEY")
+            custom_api_model = os.environ.get("CUSTOM_API_MODEL")
+            custom_api_system_prompt = os.environ.get("CUSTOM_API_SYSTEM_PROMPT")
+            custom_api_enabled = os.environ.get("CUSTOM_API_ENABLED", "true").lower() != "false"
+
+            # If not set via .env, try config_manager
+            api_config = getattr(self, 'config_manager', None)
+            if api_config:
+                api_section = api_config.get_section('custom_api')
+                if api_section:
+                    custom_api_url = custom_api_url or api_section.data.get('url')
+                    custom_api_key = custom_api_key or api_section.data.get('api_key')
+                    custom_api_model = custom_api_model or api_section.data.get('model')
+                    custom_api_system_prompt = custom_api_system_prompt or api_section.data.get('system_prompt')
+                    custom_api_enabled = api_section.data.get('enabled', custom_api_enabled)
+
+            if not custom_api_enabled:
+                custom_api_url = None
+                logger.info("Custom API disabled in config")
+
             # Pass credentials directly (no temp file needed)
-            self.generator = EnhancedTemplateGeneratorV3(credentials=credentials)
+            self.generator = EnhancedTemplateGeneratorV3(
+                credentials=credentials,
+                custom_api_url=custom_api_url if custom_api_url else None,
+                custom_api_key=custom_api_key if custom_api_key else None,
+                custom_api_model=custom_api_model if custom_api_model else None,
+                custom_api_system_prompt=custom_api_system_prompt if custom_api_system_prompt else None,
+            )
                 
         except Exception as e:
             logger.error(f"Failed to initialize generator: {e}", exc_info=True)

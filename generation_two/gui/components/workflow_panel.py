@@ -800,26 +800,17 @@ The expression should combine OPERATORS (functions like ts_rank, ts_delta, rank)
 
 Generate a valid FASTEXPR expression that uses operator(data_field, parameters) syntax."""
                     
-                    # Update progress
-                    self._update_gen_slot_progress(primary_slot_id, 20.0, "Calling Ollama...", "")
-                    self._log_to_gen_slot(primary_slot_id, "Calling Ollama API...")
-                    logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Calling Ollama API for template {template_index+1}")
+                    # Generate template using Custom API / 9router only
+                    self._update_gen_slot_progress(primary_slot_id, 20.0, "Calling 9router LLM...", "")
+                    self._log_to_gen_slot(primary_slot_id, "Calling 9router LLM...")
+                    logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Calling Custom API for template {template_index+1}")
                     
-                    # Generate template using Ollama
-                    avoidance_context = self.generator.template_generator.duplicate_detector.get_avoidance_context(limit=10)
-                    template = self.generator.template_generator.ollama_manager.generate_template(
-                        prompt,
+                    template = self.generator.template_generator.generate_fast_expr_with_custom_api(
+                        prompt=prompt,
                         region=region,
-                        avoid_duplicates_context=avoidance_context,
                         available_operators=available_operators,
                         available_fields=data_fields,
-                        successful_patterns=successful_patterns
                     )
-                    
-                    if not template:
-                        # Try fallback
-                        self._update_gen_slot_progress(primary_slot_id, 40.0, "Trying fallback...", "")
-                        template = self.generator.template_generator.generate_template_from_prompt(prompt, region=region, use_ollama=True)
                     
                     if not template:
                         completed_count['failed'] += 1

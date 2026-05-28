@@ -367,8 +367,8 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     # Update progress ONCE before Ollama call (no updates during call to prevent freeze)
                     if self.gen_slot_manager:
                         slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                        slot.update_progress(25.0, "Calling Ollama API...", "")
-                        slot.add_log("Calling Ollama API...")
+                        slot.update_progress(25.0, "Generating alpha template...", "")
+                        slot.add_log("Generating alpha template...")
                     # Reduced logging frequency - only log important events
                     if template_index == 0 or (template_index + 1) % 5 == 0:
                         logger.info(f"[Step 4] Slot {primary_slot_id+1}: Generating template {template_index+1}/{count}")
@@ -452,60 +452,94 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                         
                         selected_operators_list = [available_operators[i] for i in selected_operator_indices if i < len(available_operators)]
                     
-                    # Generate template algorithmically (NO Ollama calls in Step 4)
+                    # Generate template with Custom API (9router) instead of random algorithmic generation
                     if self.gen_slot_manager:
                         slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                        slot.update_progress(30.0, "Generating algorithmically...", "")
-                        slot.add_log("🔄 Generating placeholder expression...")
+                        slot.update_progress(30.0, "Calling 9router LLM...", "")
+                        slot.add_log("🤖 Calling 9router LLM for FASTEXPR...")
                     
-                    from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
                     import random
+                    import re
                     
-                    generator = AlgorithmicTemplateGenerator(selected_operators_list, selected_fields)
+                    operator_context = "\n".join([
+                        f"- {op.get('name', '')}: {op.get('definition', op.get('signature', ''))} | {op.get('description', '')[:160]}"
+                        for op in (selected_operators_list or [])[:8]
+                    ])
+                    field_context = "\n".join([
+                        f"- {field.get('id', '')}: {field.get('description', '')[:120]}"
+                        for field in (selected_fields or [])[:8]
+                    ])
                     
-                    # Try to generate unique template (check duplicates)
-                    max_duplicate_retries = 10
+                    llm_prompt = f"""Generate exactly ONE valid WorldQuant Brain FASTEXPR alpha expression for region {region}.
+
+STRICT RULES:
+- Return ONLY the expression. No markdown. No explanation. No bullets.
+- Use only these operators and fields.
+- Respect operator arity/signature exactly.
+- Avoid placeholders like OPERATOR1 or DATA_FIELD1.
+- Prefer simple valid expressions with 2-4 operators.
+- Avoid invalid nesting and wrong number of inputs.
+
+Allowed operators:
+{operator_context}
+
+Allowed fields:
+{field_context}
+
+Examples of acceptable style:
+rank(ts_delta(close, 5))
+ts_rank(volume, 20)
+rank(ts_mean(returns, 10))
+"""
+                    
                     template = None
+                    max_duplicate_retries = 3
                     for attempt in range(max_duplicate_retries):
-                        # Choose generation method randomly
-                        methods = ["random_walk", "brownian", "tree", "linear"]
-                        method = random.choice(methods)
-                        
-                        placeholder_expr = generator.generate_placeholder_expression(
-                            max_operators=5,
-                            method=method
+                        raw_template = self.workflow.generator.template_generator.generate_fast_expr_with_custom_api(
+                            prompt=llm_prompt,
+                            region=region,
+                            available_operators=selected_operators_list,
+                            available_fields=selected_fields,
                         )
+                        if not raw_template:
+                            continue
                         
-                        # Check for duplicates in database
+                        # Extract one expression line if model returns text
+                        lines = [line.strip() for line in raw_template.splitlines() if line.strip()]
+                        for line in lines:
+                            line = line.strip('`').strip()
+                            if line.lower().startswith(("alpha", "expression", "here", "sure", "note")):
+                                continue
+                            if "(" in line and ")" in line:
+                                raw_template = line
+                                break
+                        
+                        candidate = raw_template.strip().strip('`').strip()
+                        candidate = re.sub(r'^[-*\d\.\)\s]+', '', candidate).strip()
+                        candidate = re.sub(r'^[A-Za-z ]+:\s*', '', candidate).strip()
+                        
+                        # Check duplicate in database
                         if hasattr(self.workflow.generator, 'backtest_storage') and self.workflow.generator.backtest_storage:
                             from generation_two.core import template_similarity
                             similarity_checker = template_similarity.TemplateSimilarityChecker()
-                            template_hash = similarity_checker.get_template_hash(placeholder_expr)
-                            
-                            # Check if this template exists
+                            candidate_hash = similarity_checker.get_template_hash(candidate)
                             existing_templates = self.workflow.generator.backtest_storage.get_all_templates(region=region, limit=1000)
-                            is_duplicate = False
-                            
-                            for existing_template in existing_templates:
-                                existing_hash = similarity_checker.get_template_hash(existing_template)
-                                if existing_hash == template_hash:
-                                    is_duplicate = True
-                                    logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Duplicate template detected, retrying...")
-                                    break
-                            
-                            if not is_duplicate:
-                                template = placeholder_expr
-                                break
-                        else:
-                            # No database, just use the generated template
-                            template = placeholder_expr
-                            break
+                            is_duplicate = any(
+                                similarity_checker.get_template_hash(existing_template) == candidate_hash
+                                for existing_template in existing_templates
+                            )
+                            if is_duplicate:
+                                self._log_to_gen_slot(primary_slot_id, "⚠️ LLM generated duplicate, retrying...")
+                                continue
+                        
+                        template = candidate
+                        break
                     
                     if not template:
                         completed_count['failed'] += 1
-                        self.gen_slot_manager.release_slots(slot_ids, success=False, error="Could not generate unique template")
-                        self._update_gen_slot_display(primary_slot_id, "FAILED", "Duplicate check failed", f"❌ Failed", ["❌ Could not generate unique template"], 100.0, "")
-                        self._log_to_gen_slot(primary_slot_id, "❌ Could not generate unique template after retries")
+                        self.gen_slot_manager.release_slots(slot_ids, success=False, error="9router failed to generate unique template")
+                        self._update_gen_slot_display(primary_slot_id, "FAILED", "LLM generation failed", f"❌ Failed", ["❌ 9router failed to generate unique template"], 100.0, "")
+                        self._log_to_gen_slot(primary_slot_id, "❌ 9router failed to generate unique template")
                         return
                     
                     # Update status
@@ -627,10 +661,10 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 self._update_gen_slot_display(primary_slot_id, "FAILED", "Duplicate operators", f"❌ {duplicate_info}", [f"❌ Consecutive duplicates: {duplicate_info}"], 100.0, "")
                                 return
                     
-                    # Update progress
+                    # Update progress after generation/validation; storage/release will mark 100%
                     if self.gen_slot_manager:
                         slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
-                        slot.update_progress(80.0, "✅ Generated", "")
+                        slot.update_progress(90.0, "✅ Generated, storing...", "")
                         slot.add_log(f"Generated: {template[:50]}...")
                     self._log_to_gen_slot(primary_slot_id, f"Generated: {template[:50]}...")
                     # Only log important events (successful generation)
@@ -755,15 +789,28 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     # Don't use join() as it can block - just check if threads are alive
                     max_wait_time = 600  # 10 minutes max
                     start_wait = time.time()
+                    current_thread = threading.current_thread()
                     while self.generation_running and (time.time() - start_wait) < max_wait_time:
-                        alive_threads = [t for t in self.generation_threads if t.is_alive()]
+                        # Exclude coordinator thread itself; otherwise this loop waits until timeout
+                        alive_threads = [
+                            t for t in self.generation_threads
+                            if t is not current_thread and t.is_alive()
+                        ]
                         if not alive_threads:
                             break
+                        completed = completed_count['successful'] + completed_count['failed']
+                        remaining = max(0, completed_count['total'] - completed)
+                        self.workflow.frame.after_idle(lambda r=remaining, c=completed: self.gen_progress_label.config(
+                            text=f"Queue: {r}, Completed: {c}/{completed_count['total']}"
+                        ))
                         time.sleep(1)  # Check every second
                     
                     # Final update (batched to reduce GUI calls)
                     def final_updates():
-                        self.gen_progress_label.config(text="")
+                        completed = completed_count['successful'] + completed_count['failed']
+                        self.gen_progress_label.config(
+                            text=f"Queue: 0, Completed: {completed}/{completed_count['total']}"
+                        )
                         self._update_templates_list(generated_templates)
                         self.generate_button.config(state=tk.NORMAL)
                         self.stop_generation_button.config(state=tk.DISABLED)
@@ -780,9 +827,12 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                         logger.debug(f"[Step 4] Batch complete")
                     # Batch final state updates
                     def cleanup_updates():
+                        completed = completed_count['successful'] + completed_count['failed']
                         self.generate_button.config(state=tk.NORMAL)
                         self.stop_generation_button.config(state=tk.DISABLED)
-                        self.gen_progress_label.config(text="")
+                        self.gen_progress_label.config(
+                            text=f"Queue: 0, Completed: {completed}/{completed_count['total']}"
+                        )
                     
                     self.workflow.frame.after_idle(cleanup_updates)
             

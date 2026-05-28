@@ -115,6 +115,15 @@ class ConfigManager:
             'fallback_enabled': True
         }, "Template generation configuration")
         
+        # Custom API configuration (OpenAI-compatible: 9router, local proxy, etc.)
+        self.add_section('custom_api', {
+            'enabled': True,
+            'url': 'http://localhost:20128/v1',
+            'api_key': 'sk-15a4488d7e3f1820-vnfqts-fb3b91ce',
+            'model': 'gh/gpt-5.4-mini',
+            'system_prompt': 'You are an expert WorldQuant Brain alpha researcher. Return exactly one valid FASTEXPR expression. No markdown, no explanation, no placeholders. Respect operator signatures and arity exactly.',
+        }, "Custom OpenAI-compatible API (9router / local proxy)")
+        
         # Advanced Bandit System configuration
         self.add_section('advanced_bandits', {
             'enabled': True,

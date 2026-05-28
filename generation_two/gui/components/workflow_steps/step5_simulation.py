@@ -402,7 +402,7 @@ class Step5Simulation:
                     # Clean template - remove backticks and fix common errors
                     template = template.replace('`', '').strip()
                     
-                    # V4 Approach: Replace placeholders using Ollama selection (if using algorithmic generation)
+                    # Replace placeholders locally (Ollama disabled; 9router only for LLM generation)
                     if self.workflow.generator and self.workflow.generator.template_generator:
                         available_operators = None
                         if hasattr(self.workflow.generator.template_generator, 'operator_fetcher'):
@@ -415,26 +415,18 @@ class Step5Simulation:
                         has_field_placeholders = template and ('DATA_FIELD' in template.upper() or 'data_field' in template.lower())
                         
                         if has_operator_placeholders or has_field_placeholders:
-                            # Use Ollama to select indices for replacement
-                            if available_operators and available_fields and hasattr(self.workflow.generator.template_generator, 'ollama_manager'):
-                                self._log_to_slot(primary_slot_id, "🤖 Asking Ollama to select operators and fields...")
-                                
-                                def progress_callback(msg):
-                                    self._log_to_slot(primary_slot_id, f"🤖 {msg}")
-                                
-                                # Get backtest_storage for field usage tracking
-                                backtest_storage = None
-                                if hasattr(self.workflow.generator, 'backtest_storage'):
-                                    backtest_storage = self.workflow.generator.backtest_storage
-                                
-                                replaced = self.workflow.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                    template,
-                                    available_operators,
-                                    available_fields,
-                                    progress_callback=progress_callback,
-                                    region=template_region,
-                                    backtest_storage=backtest_storage
-                                )
+                            # No Ollama: deterministic placeholder replacement only
+                            if available_operators and available_fields:
+                                self._log_to_slot(primary_slot_id, "🔁 Replacing placeholders locally (Ollama disabled)...")
+                                if has_operator_placeholders:
+                                    template = self.workflow.generator.template_generator._replace_operator_placeholders(
+                                        template, available_operators
+                                    )
+                                if has_field_placeholders:
+                                    template = self.workflow.generator.template_generator._replace_field_placeholders(
+                                        template, available_fields, template_region
+                                    )
+                                replaced = template
                                 if replaced:
                                     template = replaced
                                     # Verify all placeholders were actually replaced
@@ -443,43 +435,14 @@ class Step5Simulation:
                                     remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
                                     
                                     if remaining_ops or remaining_fields:
-                                        self._log_to_slot(primary_slot_id, f"⚠️ Some placeholders not replaced! Remaining: {remaining_ops + remaining_fields}")
-                                        self._log_to_slot(primary_slot_id, "🔄 Retrying placeholder replacement...")
-                                        # Retry once more
-                                        # Get backtest_storage for field usage tracking
-                                        backtest_storage = None
-                                        if hasattr(self.workflow.generator, 'backtest_storage'):
-                                            backtest_storage = self.workflow.generator.backtest_storage
-                                        
-                                        replaced_retry = self.workflow.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                            template,
-                                            available_operators,
-                                            available_fields,
-                                            progress_callback=progress_callback,
-                                            region=template_region,
-                                            backtest_storage=backtest_storage
-                                        )
-                                        if replaced_retry:
-                                            template = replaced_retry
-                                            # Check again
-                                            remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
-                                            remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
-                                            if remaining_ops or remaining_fields:
-                                                self._log_to_slot(primary_slot_id, f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
-                                                self._log_to_slot(primary_slot_id, f"❌ Skipping submission - template: {template[:100]}...")
-                                                # Mark as failed and skip submission
-                                                self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
-                                                return
-                                            else:
-                                                self._log_to_slot(primary_slot_id, "✅ All placeholders replaced after retry")
-                                        else:
-                                            self._log_to_slot(primary_slot_id, "❌ Retry replacement failed, skipping submission")
-                                            self.slot_manager.update_slot_status(slot_ids, "FAILED", "Placeholder replacement failed")
-                                            return
+                                        self._log_to_slot(primary_slot_id, f"❌ Local replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
+                                        self._log_to_slot(primary_slot_id, f"❌ Skipping submission - template: {template[:100]}...")
+                                        self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                        return
                                     else:
-                                        self._log_to_slot(primary_slot_id, "✅ Ollama selection completed, all placeholders replaced")
+                                        self._log_to_slot(primary_slot_id, "✅ Local placeholder replacement completed")
                                 else:
-                                    self._log_to_slot(primary_slot_id, "⚠️ Ollama selection failed, using fallback replacement")
+                                    self._log_to_slot(primary_slot_id, "⚠️ Local replacement failed, using fallback replacement")
                                     # Fallback to old method
                                     if has_operator_placeholders:
                                         template = self.workflow.generator.template_generator._replace_operator_placeholders(
@@ -608,37 +571,16 @@ class Step5Simulation:
                                 
                                 available_fields = self.workflow.generator.template_generator.get_data_fields_for_region(template_region)
                                 
-                                if available_operators and available_fields and hasattr(self.workflow.generator.template_generator, 'ollama_manager'):
-                                    def progress_callback_refeed(msg):
-                                        self._log_to_slot(primary_slot_id, f"🤖 {msg}")
-                                    
-                                    # Get backtest_storage for field usage tracking
-                                    backtest_storage = None
-                                    if hasattr(self.workflow.generator, 'backtest_storage'):
-                                        backtest_storage = self.workflow.generator.backtest_storage
-                                    
-                                    replaced = self.workflow.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                        template,
-                                        available_operators,
-                                        available_fields,
-                                        progress_callback=progress_callback_refeed,
-                                        region=template_region,
-                                        backtest_storage=backtest_storage
-                                    )
-                                    if replaced:
-                                        template = replaced
-                                        self._log_to_slot(primary_slot_id, "✅ Placeholders replaced before refeed")
-                                    else:
-                                        self._log_to_slot(primary_slot_id, "⚠️ Placeholder replacement failed, using fallback")
-                                        # Fallback to old method
-                                        if has_operator_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                template, available_operators
-                                            )
-                                        if has_field_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                template, available_fields, template_region
-                                            )
+                                if available_operators and available_fields:
+                                    if has_operator_placeholders:
+                                        template = self.workflow.generator.template_generator._replace_operator_placeholders(
+                                            template, available_operators
+                                        )
+                                    if has_field_placeholders:
+                                        template = self.workflow.generator.template_generator._replace_field_placeholders(
+                                            template, available_fields, template_region
+                                        )
+                                    self._log_to_slot(primary_slot_id, "✅ Placeholders replaced before refeed (local)")
                                 else:
                                     # Fallback to old method
                                     if has_operator_placeholders and available_operators:
@@ -685,36 +627,16 @@ class Step5Simulation:
                                             
                                             available_fields = self.workflow.generator.template_generator.get_data_fields_for_region(template_region)
                                             
-                                            if available_operators and available_fields and hasattr(self.workflow.generator.template_generator, 'ollama_manager'):
-                                                def progress_callback_refeed_retry(msg):
-                                                    self._log_to_slot(primary_slot_id, f"🤖 {msg}")
-                                                
-                                                # Get backtest_storage for field usage tracking
-                                                backtest_storage = None
-                                                if hasattr(self.workflow.generator, 'backtest_storage'):
-                                                    backtest_storage = self.workflow.generator.backtest_storage
-                                                
-                                                replaced_retry = self.workflow.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                                    current_template_for_retry,
-                                                    available_operators,
-                                                    available_fields,
-                                                    progress_callback=progress_callback_refeed_retry,
-                                                    region=template_region,
-                                                    backtest_storage=backtest_storage
-                                                )
-                                                if replaced_retry:
-                                                    current_template_for_retry = replaced_retry
-                                                    self._log_to_slot(primary_slot_id, "✅ Placeholders replaced in fixed template")
-                                                else:
-                                                    # Fallback
-                                                    if has_op_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                            current_template_for_retry, available_operators
-                                                        )
-                                                    if has_field_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                            current_template_for_retry, available_fields, template_region
-                                                        )
+                                            if available_operators and available_fields:
+                                                if has_op_placeholders:
+                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
+                                                        current_template_for_retry, available_operators
+                                                    )
+                                                if has_field_placeholders:
+                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
+                                                        current_template_for_retry, available_fields, template_region
+                                                    )
+                                                self._log_to_slot(primary_slot_id, "✅ Placeholders replaced in fixed template (local)")
                                             else:
                                                 # Fallback
                                                 if has_op_placeholders and available_operators:
@@ -803,21 +725,15 @@ class Step5Simulation:
                                                             
                                                             available_fields = self.workflow.generator.template_generator.get_data_fields_for_region(template_region)
                                                             
-                                                            if available_operators and available_fields and hasattr(self.workflow.generator.template_generator, 'ollama_manager'):
-                                                                # Get backtest_storage for field usage tracking
-                                                                backtest_storage = None
-                                                                if hasattr(self.workflow.generator, 'backtest_storage'):
-                                                                    backtest_storage = self.workflow.generator.backtest_storage
-                                                                
-                                                                replaced_again = self.workflow.generator.template_generator.ollama_manager.replace_placeholders_with_selection(
-                                                                    fixed_template_again,
-                                                                    available_operators,
-                                                                    available_fields,
-                                                                    region=template_region,
-                                                                    backtest_storage=backtest_storage
-                                                                )
-                                                                if replaced_again:
-                                                                    fixed_template_again = replaced_again
+                                                            if available_operators and available_fields:
+                                                                if has_op_ph:
+                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_operator_placeholders(
+                                                                        fixed_template_again, available_operators
+                                                                    )
+                                                                if has_field_ph:
+                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_field_placeholders(
+                                                                        fixed_template_again, available_fields, template_region
+                                                                    )
                                                             else:
                                                                 # Fallback
                                                                 if has_op_ph and available_operators:

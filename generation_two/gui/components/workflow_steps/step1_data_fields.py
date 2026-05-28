@@ -307,6 +307,35 @@ class Step1DataFields:
         if filename:
             self.operator_path_var.set(filename)
     
+    def _normalize_operator_schema(self, operators):
+        """Normalize supported operator JSON schemas to generation_two operatorRAW shape."""
+        normalized = []
+        for op in operators:
+            if not isinstance(op, dict):
+                continue
+
+            signature = op.get('signature') or op.get('definition') or ''
+            name = op.get('name')
+            if not name and signature:
+                name = signature.split('(')[0].strip()
+
+            definition = op.get('definition') or signature or name or ''
+            description = op.get('description') or op.get('documentation') or ''
+            examples = op.get('examples') or op.get('example') or ''
+            if examples and examples not in description:
+                description = f"{description}\nExample: {examples}".strip()
+
+            normalized.append({
+                **op,
+                'name': name or 'Unknown',
+                'definition': definition,
+                'category': op.get('category') or 'Unknown',
+                'description': description,
+                'scope': op.get('scope') or ['REGULAR'],
+                'level': op.get('level') or 'ALL',
+            })
+        return normalized
+
     def _load_operator_file(self):
         """Load operators from user-specified file"""
         operator_path = self.operator_path_var.get()
@@ -324,6 +353,14 @@ class Step1DataFields:
             
             if not operators or not isinstance(operators, list):
                 messagebox.showerror("Error", "Invalid operator file format")
+                return
+
+            operators = self._normalize_operator_schema(operators)
+            if not any(op.get('name') and op.get('name') != 'Unknown' for op in operators):
+                messagebox.showerror(
+                    "Error",
+                    "Operator file missing operator names. Expected `name` or `signature` fields."
+                )
                 return
             
             # Update operator fetcher

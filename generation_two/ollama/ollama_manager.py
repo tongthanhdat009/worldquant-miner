@@ -7,16 +7,16 @@ Intelligently manages Ollama connections with fallback and error handling
 print("[ollama_manager] Starting imports...", flush=True)
 
 import logging
-print("[ollama_manager]   ✓ logging", flush=True)
+print("[ollama_manager]   OK logging", flush=True)
 import time
 import threading
 import random
 import re
 import json
-print("[ollama_manager]   ✓ time, threading, random, re, json", flush=True)
+print("[ollama_manager]   OK time, threading, random, re, json", flush=True)
 from typing import Optional, List, Dict, Callable, Any
 from datetime import datetime, timedelta
-print("[ollama_manager]   ✓ typing, datetime", flush=True)
+print("[ollama_manager]   OK typing, datetime", flush=True)
 
 # V2 style: Import ollama LAZILY (only when needed) to avoid blocking during module import
 # CRITICAL: Do NOT import ollama at module level - it may try to connect to server and block
@@ -26,7 +26,7 @@ print("[ollama_manager] Setting up imports (ollama will be lazy)...", flush=True
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-print("[ollama_manager]   ✓ requests imported", flush=True)
+print("[ollama_manager]   OK requests imported", flush=True)
 print("[ollama_manager]   ℹ ollama will be imported lazily when first used", flush=True)
 
 # Import modularized utilities
@@ -42,7 +42,7 @@ from .ollama_request import (
     call_ollama_requests,
     create_progress_monitor
 )
-print("[ollama_manager]   ✓ modularized utilities imported", flush=True)
+print("[ollama_manager]   OK modularized utilities imported", flush=True)
 
 # OLLAMA_AVAILABLE is kept for backward compatibility but always False at module level
 # We'll do lazy imports when actually needed (in methods, not at module level)

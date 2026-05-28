@@ -131,6 +131,9 @@ class DashboardPanel:
                 rate = (successful / total) * 100
                 self.stat_labels['success_rate'].config(text=f"{rate:.1f}%")
         
+        if 'success_rate' in stats:
+            self.stat_labels['success_rate'].config(text=f"{stats.get('success_rate', 0.0) * 100:.1f}%")
+        
         # Avg Sharpe
         if 'avg_sharpe' in stats:
             self.stat_labels['avg_sharpe'].config(text=f"{stats['avg_sharpe']:.3f}")

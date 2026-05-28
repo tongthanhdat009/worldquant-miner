@@ -22,7 +22,7 @@ class TemplateValidator:
     3. Learning from simulation errors
     """
     
-    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = False):
+    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = False, llm_generate_func=None):
         """
         Initialize validator
         
@@ -54,7 +54,8 @@ class TemplateValidator:
             self.validator = None
             self.compiler = None
         
-        self.ollama_manager = ollama_manager
+        self.ollama_manager = None  # Ollama disabled; kept only for legacy compatibility
+        self.llm_generate_func = llm_generate_func
         
         # V2-style error patterns
         self.error_patterns = {
@@ -80,6 +81,19 @@ class TemplateValidator:
             ],
         }
     
+    def _llm_generate(self, prompt: str, max_tokens: int = 500) -> Optional[str]:
+        """Generate text using configured Custom API callback only."""
+        if not self.llm_generate_func:
+            logger.debug("Custom API LLM callback not configured for TemplateValidator")
+            return None
+        try:
+            return self.llm_generate_func(prompt=prompt, max_tokens=max_tokens)
+        except TypeError:
+            return self.llm_generate_func(prompt)
+        except Exception as e:
+            logger.debug(f"TemplateValidator custom LLM generation failed: {e}")
+            return None
+
     def _cleanup_template(self, template: str) -> str:
         """
         Clean up common syntax errors in generated templates
@@ -492,7 +506,7 @@ Common FASTEXPR errors:
 DIAGNOSIS (be specific):"""
 
         try:
-            diagnosis = self.ollama_manager.generate(diagnosis_prompt, max_tokens=200)
+            diagnosis = self._llm_generate(diagnosis_prompt, max_tokens=200)
             logger.debug(f"AI Diagnosis: {diagnosis[:100] if diagnosis else 'None'}")
         except Exception as e:
             logger.debug(f"Diagnosis step failed: {e}")
@@ -594,7 +608,7 @@ FIXED EXPRESSION:"""
         fixed = None  # Initialize to avoid "cannot access local variable" error
         try:
             # Use higher max_tokens for complex fixes
-            response = self.ollama_manager.generate(fix_prompt, max_tokens=800)
+            response = self._llm_generate(fix_prompt, max_tokens=800)
             if response:
                 # Extract expression from response
                 fixed = self._extract_expression_from_response(response)
@@ -1597,7 +1611,7 @@ FIXED EXPRESSION:"""
                     i += 1
         
         # If no specific fix found, try prompt engineering approach
-        if not fixes and self.ollama_manager:
+        if not fixes and self.llm_generate_func:
             logger.info("🔧 Trying prompt engineering for input count fix...")
             prompt = f"""Fix this FASTEXPR expression that has wrong number of operator parameters:
 
@@ -1612,7 +1626,7 @@ The operator has the wrong number of inputs. Fix it by:
 Return ONLY the fixed expression, no explanations:"""
             
             try:
-                response = self.ollama_manager.generate(prompt, max_tokens=300)
+                response = self._llm_generate(prompt, max_tokens=300)
                 if response:
                     fixed = self._extract_expression_from_response(response)
                     if fixed and fixed != template:

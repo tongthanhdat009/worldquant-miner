@@ -172,6 +172,9 @@ class SlotManager:
             slot.result = result
             slot.error = error
             
+            if success:
+                slot.update_progress(100.0, "Completed", "")
+            
             if success and result:
                 alpha_id = result.get('alpha_id', '') if isinstance(result, dict) else ''
                 # Ensure alpha_id is a string, not a tuple or list
